@@ -10,8 +10,105 @@ use nix::{
 };
 use serde::Deserialize;
 use std::{fs::read_to_string, os::fd::AsFd};
+use std::collections::HashMap;
 
 const USER_CFG_PATH: &str = "/etc/tiny-dfr/config.toml";
+
+#[derive(Debug, Clone)]
+pub struct ColorConfig {
+    pub button_background_inactive: [f64; 3],
+    pub button_background_active: [f64; 3],
+    pub icon_color: [f64; 3],
+    pub icon_color_active: [f64; 3],
+    pub text_color: [f64; 3],
+    pub button_overrides: Option<HashMap<String, ButtonColorOverride>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ButtonColorOverride {
+    pub button_background_inactive: Option<[f64; 3]>,
+    pub button_background_active: Option<[f64; 3]>,
+    pub icon_color: Option<[f64; 3]>,
+    pub icon_color_active: Option<[f64; 3]>,
+    pub text_color: Option<[f64; 3]>,
+}
+
+impl Default for ColorConfig {
+    fn default() -> Self {
+        Self {
+            button_background_inactive: [0.2, 0.2, 0.2],
+            button_background_active: [0.4, 0.4, 0.4],
+            icon_color: [1.0, 1.0, 1.0],
+            icon_color_active: [1.0, 1.0, 1.0],
+            text_color: [1.0, 1.0, 1.0],
+            button_overrides: None,
+        }
+    }
+}
+
+impl ColorConfig {
+    pub fn from_theme(theme: &str) -> Self {
+        match theme.to_lowercase().as_str() {
+            "light" => Self {
+                button_background_inactive: [0.9, 0.9, 0.9],
+                button_background_active: [0.7, 0.7, 0.7],
+                icon_color: [0.1, 0.1, 0.1],
+                icon_color_active: [0.0, 0.0, 0.0],
+                text_color: [0.1, 0.1, 0.1],
+                button_overrides: None,
+            },
+            "colorful" => Self {
+                button_background_inactive: [0.15, 0.15, 0.15],
+                button_background_active: [0.35, 0.35, 0.35],
+                icon_color: [1.0, 0.8, 0.6],
+                icon_color_active: [1.0, 1.0, 0.8],
+                text_color: [1.0, 1.0, 1.0],
+                button_overrides: None,
+            },
+            "minimal" => Self {
+                button_background_inactive: [0.1, 0.1, 0.1],
+                button_background_active: [0.2, 0.2, 0.2],
+                icon_color: [0.9, 0.9, 0.9],
+                icon_color_active: [1.0, 1.0, 1.0],
+                text_color: [0.9, 0.9, 0.9],
+                button_overrides: None,
+            },
+            _ => Self::default(), // "dark" theme or unknown theme
+        }
+    }
+
+    pub fn get_button_colors(&self, button_text: &str) -> ([f64; 3], [f64; 3], [f64; 3], [f64; 3], [f64; 3]) {
+        let mut bg_inactive = self.button_background_inactive;
+        let mut bg_active = self.button_background_active;
+        let mut icon_color = self.icon_color;
+        let mut icon_color_active = self.icon_color_active;
+        let mut text_color = self.text_color;
+
+        // Check for button-specific overrides
+        if let Some(ref overrides) = self.button_overrides {
+            if let Some(override_config) = overrides.get(button_text) {
+                if let Some(inactive) = override_config.button_background_inactive {
+                    bg_inactive = inactive;
+                }
+                if let Some(active) = override_config.button_background_active {
+                    bg_active = active;
+                }
+                if let Some(icon) = override_config.icon_color {
+                    icon_color = icon;
+                }
+                if let Some(icon_active) = override_config.icon_color_active {
+                    icon_color_active = icon_active;
+                }
+                if let Some(text) = override_config.text_color {
+                    text_color = text;
+                }
+            }
+        }
+
+        (bg_inactive, bg_active, icon_color, icon_color_active, text_color)
+    }
+}
 
 pub struct Config {
     pub show_button_outlines: bool,
@@ -19,6 +116,7 @@ pub struct Config {
     pub font_face: FontFace,
     pub adaptive_brightness: bool,
     pub active_brightness: u32,
+    pub colors: ColorConfig,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +130,51 @@ struct ConfigProxy {
     active_brightness: Option<u32>,
     primary_layer_keys: Option<Vec<ButtonConfig>>,
     media_layer_keys: Option<Vec<ButtonConfig>>,
+    colors: Option<ColorConfigProxy>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct ColorConfigProxy {
+    theme: Option<String>,
+    button_background_inactive: Option<[f64; 3]>,
+    button_background_active: Option<[f64; 3]>,
+    icon_color: Option<[f64; 3]>,
+    icon_color_active: Option<[f64; 3]>,
+    text_color: Option<[f64; 3]>,
+    button_overrides: Option<HashMap<String, ButtonColorOverride>>,
+}
+
+impl ColorConfigProxy {
+    fn to_color_config(&self) -> ColorConfig {
+        let mut colors = if let Some(theme) = &self.theme {
+            ColorConfig::from_theme(theme)
+        } else {
+            ColorConfig::default()
+        };
+
+        // Override with custom values if provided
+        if let Some(inactive) = self.button_background_inactive {
+            colors.button_background_inactive = inactive;
+        }
+        if let Some(active) = self.button_background_active {
+            colors.button_background_active = active;
+        }
+        if let Some(icon_color) = self.icon_color {
+            colors.icon_color = icon_color;
+        }
+        if let Some(icon_color_active) = self.icon_color_active {
+            colors.icon_color_active = icon_color_active;
+        }
+        if let Some(text_color) = self.text_color {
+            colors.text_color = text_color;
+        }
+        if let Some(button_overrides) = &self.button_overrides {
+            colors.button_overrides = Some(button_overrides.clone());
+        }
+
+        colors
+    }
 }
 
 #[derive(Deserialize)]
@@ -79,6 +222,7 @@ fn load_config(width: u16) -> (Config, [FunctionLayer; 2]) {
         base.media_layer_keys = user.media_layer_keys.or(base.media_layer_keys);
         base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
         base.active_brightness = user.active_brightness.or(base.active_brightness);
+        base.colors = user.colors.or(base.colors);
     };
     let mut media_layer_keys = base.media_layer_keys.unwrap();
     let mut primary_layer_keys = base.primary_layer_keys.unwrap();
@@ -112,6 +256,7 @@ fn load_config(width: u16) -> (Config, [FunctionLayer; 2]) {
         adaptive_brightness: base.adaptive_brightness.unwrap(),
         font_face: load_font(&base.font_template.unwrap()),
         active_brightness: base.active_brightness.unwrap(),
+        colors: base.colors.unwrap_or_default().to_color_config(),
     };
     (cfg, layers)
 }

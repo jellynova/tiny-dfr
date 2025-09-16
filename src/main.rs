@@ -50,8 +50,7 @@ use display::DrmBackend;
 use pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
 
 const BUTTON_SPACING_PX: i32 = 16;
-const BUTTON_COLOR_INACTIVE: f64 = 0.200;
-const BUTTON_COLOR_ACTIVE: f64 = 0.400;
+// Color constants are now configurable through the config system
 const ICON_SIZE: i32 = 48;
 const TIMEOUT_MS: i32 = 10 * 1000;
 
@@ -342,9 +341,11 @@ impl Button {
         button_left_edge: f64,
         button_width: u64,
         y_shift: f64,
+        config: &crate::config::Config,
     ) {
         match &self.image {
             ButtonImage::Text(text) => {
+                self.set_text_color(c, config);
                 let extents = c.text_extents(text).unwrap();
                 c.move_to(
                     button_left_edge + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
@@ -357,8 +358,7 @@ impl Button {
                     button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
                 let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
 
-                svg.render_document(c, &Rectangle::new(x, y, ICON_SIZE as f64, ICON_SIZE as f64))
-                    .unwrap();
+                self.render_svg_with_color(c, svg, x, y, config, false);
             }
             ButtonImage::Bitmap(surf) => {
                 let x =
@@ -369,6 +369,7 @@ impl Button {
                 c.fill().unwrap();
             }
             ButtonImage::Time(format, locale) => {
+                self.set_text_color(c, config);
                 let current_time = Local::now();
                 let formatted_time = current_time.format_localized_with_items(format.iter(), *locale).to_string();
                 let time_extents = c.text_extents(&formatted_time).unwrap();
@@ -422,10 +423,10 @@ impl Button {
                         button_left_edge + (button_width as f64 / 2.0 - width / 2.0).round();
                     let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
 
-                    svg.render_document(c, &Rectangle::new(x, y, ICON_SIZE as f64, ICON_SIZE as f64))
-                        .unwrap();
+                    self.render_svg_with_color(c, svg, x, y, config, false);
                 }
                 if battery_mode.should_draw_text() {
+                    self.set_text_color(c, config);
                     c.move_to(
                         button_left_edge + (button_width as f64 / 2.0 - width / 2.0 + text_offset as f64).round(),
                         y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
@@ -434,6 +435,37 @@ impl Button {
                 }
             }
         }
+    }
+    fn render_svg_with_color(&self, c: &Context, svg: &Handle, x: f64, y: f64, config: &crate::config::Config, is_active: bool) {
+        // Save the current Cairo state
+        c.save().unwrap();
+        
+        // Get button-specific colors
+        let (_, _, icon_color, icon_color_active, _) = config.colors.get_button_colors(&self.get_text());
+        
+        // Get the configured color
+        let color = if is_active {
+            icon_color_active
+        } else {
+            icon_color
+        };
+        
+        // Create a temporary surface to render the SVG
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, ICON_SIZE, ICON_SIZE).unwrap();
+        let temp_context = cairo::Context::new(&surface).unwrap();
+        
+        // Render SVG to the temporary surface
+        svg.render_document(&temp_context, &Rectangle::new(0.0, 0.0, ICON_SIZE as f64, ICON_SIZE as f64))
+            .unwrap();
+        
+        // Set our color as the source
+        c.set_source_rgba(color[0], color[1], color[2], 1.0);
+        
+        // Use the SVG as a mask (this will apply our color to the SVG shape)
+        let _ = c.mask_surface(&surface, x, y);
+        
+        // Restore the Cairo state
+        c.restore().unwrap();
     }
     fn set_active<F>(&mut self, uinput: &mut UInputHandle<F>, active: bool)
     where
@@ -446,16 +478,60 @@ impl Button {
             toggle_key(uinput, self.action, active as i32);
         }
     }
-    fn set_backround_color(&self, c: &Context, color: f64) {
-        if let ButtonImage::Battery(battery, _, _) = &self.image {
-            let (_, state) = get_battery_state(battery);
-            match state {
-                BatteryState::NotCharging => c.set_source_rgb(color, color, color),
-                BatteryState::Charging => c.set_source_rgb(0.0, color, 0.0),
-                BatteryState::Low => c.set_source_rgb(color, 0.0, 0.0),
-            }
-        } else {
-            c.set_source_rgb(color, color, color);
+
+
+
+
+    fn set_text_color(&self, c: &Context, config: &crate::config::Config) {
+        // Get button-specific text color from overrides
+        let (_, _, _, _, text_color) = config.colors.get_button_colors(&self.get_text());
+        c.set_source_rgb(text_color[0], text_color[1], text_color[2]);
+    }
+
+    fn get_text(&self) -> String {
+        match &self.image {
+            ButtonImage::Text(text) => text.clone(),
+            ButtonImage::Time(_, _) => "Time".to_string(),
+            ButtonImage::Battery(_, _, _) => "Battery".to_string(),
+            ButtonImage::Svg(_) => self.key_to_action_string(),
+            ButtonImage::Bitmap(_) => self.key_to_action_string(),
+        }
+    }
+
+    /// Convert Key enum back to action string for color override lookup
+    fn key_to_action_string(&self) -> String {
+        match self.action {
+            // Function keys
+            Key::F1 => "F1".to_string(),
+            Key::F2 => "F2".to_string(),
+            Key::F3 => "F3".to_string(),
+            Key::F4 => "F4".to_string(),
+            Key::F5 => "F5".to_string(),
+            Key::F6 => "F6".to_string(),
+            Key::F7 => "F7".to_string(),
+            Key::F8 => "F8".to_string(),
+            Key::F9 => "F9".to_string(),
+            Key::F10 => "F10".to_string(),
+            Key::F11 => "F11".to_string(),
+            Key::F12 => "F12".to_string(),
+            Key::Esc => "esc".to_string(),
+            
+            // Media keys
+            Key::BrightnessDown => "BrightnessDown".to_string(),
+            Key::BrightnessUp => "BrightnessUp".to_string(),
+            Key::MicMute => "MicMute".to_string(),
+            Key::Search => "Search".to_string(),
+            Key::IllumDown => "IllumDown".to_string(),
+            Key::IllumUp => "IllumUp".to_string(),
+            Key::PreviousSong => "PreviousSong".to_string(),
+            Key::PlayPause => "PlayPause".to_string(),
+            Key::NextSong => "NextSong".to_string(),
+            Key::Mute => "Mute".to_string(),
+            Key::VolumeDown => "VolumeDown".to_string(),
+            Key::VolumeUp => "VolumeUp".to_string(),
+            
+            // Fallback for any other keys
+            _ => format!("{:?}", self.action),
         }
     }
 }
@@ -554,12 +630,16 @@ impl FunctionLayer {
                 + ((end - start - 1) as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64))
                     .floor();
 
-            let color = if button.active {
-                BUTTON_COLOR_ACTIVE
+            // Get button-specific colors
+            let (bg_inactive, bg_active, _, _, _) = 
+                config.colors.get_button_colors(&button.get_text());
+            
+            let (r, g, b) = if button.active {
+                (bg_active[0], bg_active[1], bg_active[2])
             } else if config.show_button_outlines {
-                BUTTON_COLOR_INACTIVE
+                (bg_inactive[0], bg_inactive[1], bg_inactive[2])
             } else {
-                0.0
+                (0.0, 0.0, 0.0)
             };
             if !complete_redraw {
                 c.set_source_rgb(0.0, 0.0, 0.0);
@@ -571,7 +651,9 @@ impl FunctionLayer {
                 );
                 c.fill().unwrap();
             }
-            button.set_backround_color(&c, color);
+            // Set the button background color
+            c.set_source_rgb(r, g, b);
+            
             // draw box with rounded corners
             c.new_sub_path();
             let left = left_edge + radius;
@@ -607,13 +689,13 @@ impl FunctionLayer {
             c.close_path();
 
             c.fill().unwrap();
-            c.set_source_rgb(1.0, 1.0, 1.0);
             button.render(
                 &c,
                 height,
                 left_edge,
                 button_width.ceil() as u64,
                 pixel_shift_y,
+                config,
             );
 
             button.changed = false;
