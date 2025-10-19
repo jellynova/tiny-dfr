@@ -48,35 +48,6 @@ impl Default for ColorConfig {
 }
 
 impl ColorConfig {
-    pub fn from_theme(theme: &str) -> Self {
-        match theme.to_lowercase().as_str() {
-            "light" => Self {
-                button_background_inactive: [0.9, 0.9, 0.9],
-                button_background_active: [0.7, 0.7, 0.7],
-                icon_color: [0.1, 0.1, 0.1],
-                icon_color_active: [0.0, 0.0, 0.0],
-                text_color: [0.1, 0.1, 0.1],
-                button_overrides: None,
-            },
-            "colorful" => Self {
-                button_background_inactive: [0.15, 0.15, 0.15],
-                button_background_active: [0.35, 0.35, 0.35],
-                icon_color: [1.0, 0.8, 0.6],
-                icon_color_active: [1.0, 1.0, 0.8],
-                text_color: [1.0, 1.0, 1.0],
-                button_overrides: None,
-            },
-            "minimal" => Self {
-                button_background_inactive: [0.1, 0.1, 0.1],
-                button_background_active: [0.2, 0.2, 0.2],
-                icon_color: [0.9, 0.9, 0.9],
-                icon_color_active: [1.0, 1.0, 1.0],
-                text_color: [0.9, 0.9, 0.9],
-                button_overrides: None,
-            },
-            _ => Self::default(), // "dark" theme or unknown theme
-        }
-    }
 
     pub fn get_button_colors(&self, button_text: &str) -> ([f64; 3], [f64; 3], [f64; 3], [f64; 3], [f64; 3]) {
         let mut bg_inactive = self.button_background_inactive;
@@ -136,7 +107,6 @@ struct ConfigProxy {
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct ColorConfigProxy {
-    theme: Option<String>,
     button_background_inactive: Option<[f64; 3]>,
     button_background_active: Option<[f64; 3]>,
     icon_color: Option<[f64; 3]>,
@@ -147,11 +117,7 @@ struct ColorConfigProxy {
 
 impl ColorConfigProxy {
     fn to_color_config(&self) -> ColorConfig {
-        let mut colors = if let Some(theme) = &self.theme {
-            ColorConfig::from_theme(theme)
-        } else {
-            ColorConfig::default()
-        };
+        let mut colors = ColorConfig::default();
 
         // Override with custom values if provided
         if let Some(inactive) = self.button_background_inactive {
