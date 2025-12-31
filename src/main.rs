@@ -358,7 +358,7 @@ impl Button {
                     button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
                 let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
 
-                self.render_svg_with_color(c, svg, x, y, config, false);
+                self.render_svg_with_color(c, svg, x, y, config, self.active);
             }
             ButtonImage::Bitmap(surf) => {
                 let x =
@@ -423,7 +423,7 @@ impl Button {
                         button_left_edge + (button_width as f64 / 2.0 - width / 2.0).round();
                     let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
 
-                    self.render_svg_with_color(c, svg, x, y, config, false);
+                    self.render_svg_with_color(c, svg, x, y, config, self.active);
                 }
                 if battery_mode.should_draw_text() {
                     self.set_text_color(c, config);
