@@ -755,6 +755,37 @@ impl FunctionLayer {
     }
 }
 
+struct LayerManager {
+    layers: Vec<FunctionLayer>,
+    active_layer: usize,
+}
+
+impl LayerManager {
+    fn new(layers: Vec<FunctionLayer>) -> Self {
+        assert!(!layers.is_empty(), "LayerManager requires at least one layer");
+        Self {
+            layers,
+            active_layer: 0,
+        }
+    }
+
+    fn cycle_layer(&mut self) {
+        self.active_layer = (self.active_layer + 1) % self.layers.len();
+    }
+
+    fn get_active(&self) -> &FunctionLayer {
+        &self.layers[self.active_layer]
+    }
+
+    fn get_active_mut(&mut self) -> &mut FunctionLayer {
+        &mut self.layers[self.active_layer]
+    }
+
+    fn active_index(&self) -> usize {
+        self.active_layer
+    }
+}
+
 struct Interface;
 
 impl LibinputInterface for Interface {
@@ -837,7 +868,7 @@ fn real_main(drm: &mut DrmBackend) {
     let mut backlight = BacklightManager::new();
     let mut last_redraw_minute = Local::now().minute();
     let mut cfg_mgr = ConfigManager::new();
-    let (mut cfg, mut layers) = cfg_mgr.load_config(width);
+    let (mut cfg, layers) = cfg_mgr.load_config(width);
     let mut pixel_shift = PixelShiftManager::new();
 
     // drop privileges to input and video group
@@ -851,7 +882,7 @@ fn real_main(drm: &mut DrmBackend) {
 
     let mut surface =
         ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
-    let mut active_layer = 0;
+    let mut layer_manager = LayerManager::new(layers);
     let mut needs_complete_redraw = true;
 
     let mut input_tb = Libinput::new_with_udev(Interface);
@@ -878,7 +909,7 @@ fn real_main(drm: &mut DrmBackend) {
         .add(&udev_monitor, EpollEvent::new(EpollFlags::EPOLLIN, 3))
         .unwrap();
     uinput.set_evbit(EventKind::Key).unwrap();
-    for layer in &layers {
+    for layer in &layer_manager.layers {
         for button in &layer.buttons {
             uinput.set_keybit(button.1.action).unwrap();
         }
@@ -905,8 +936,8 @@ fn real_main(drm: &mut DrmBackend) {
     let mut digitizer: Option<InputDevice> = None;
     let mut touches = HashMap::new();
     loop {
-        if cfg_mgr.update_config(&mut cfg, &mut layers, width) {
-            active_layer = 0;
+        if cfg_mgr.update_config(&mut cfg, &mut layer_manager.layers, width) {
+            layer_manager.active_layer = 0;
             needs_complete_redraw = true;
         }
 
@@ -923,25 +954,25 @@ fn real_main(drm: &mut DrmBackend) {
         }
 
         let current_minute = now.minute();
-        if layers[active_layer].displays_time && (current_minute != last_redraw_minute) {
+        if layer_manager.get_active().displays_time && (current_minute != last_redraw_minute) {
             needs_complete_redraw = true;
             last_redraw_minute = current_minute;
         }
-        if layers[active_layer].displays_battery {
-            for button in &mut layers[active_layer].buttons {
+        if layer_manager.get_active().displays_battery {
+            for button in &mut layer_manager.get_active_mut().buttons {
                 if let ButtonImage::Battery(_, _, _) = button.1.image {
                     button.1.changed = true;
                 }
             }
         }
 
-        if needs_complete_redraw || layers[active_layer].buttons.iter().any(|b| b.1.changed) {
+        if needs_complete_redraw || layer_manager.get_active().buttons.iter().any(|b| b.1.changed) {
             let shift = if cfg.enable_pixel_shift {
                 pixel_shift.get()
             } else {
                 (0.0, 0.0)
             };
-            let clips = layers[active_layer].draw(
+            let clips = layer_manager.get_active_mut().draw(
                 &cfg,
                 width as i32,
                 height as i32,
@@ -977,15 +1008,9 @@ fn real_main(drm: &mut DrmBackend) {
                     }
                 }
                 Event::Keyboard(KeyboardEvent::Key(key)) => {
-                    if key.key() == Key::Fn as u32 {
-                        let new_layer = match key.key_state() {
-                            KeyState::Pressed => 1,
-                            KeyState::Released => 0,
-                        };
-                        if active_layer != new_layer {
-                            active_layer = new_layer;
-                            needs_complete_redraw = true;
-                        }
+                    if key.key() == Key::Fn as u32 && key.key_state() == KeyState::Pressed {
+                        layer_manager.cycle_layer();
+                        needs_complete_redraw = true;
                     }
                 }
                 Event::Touch(te) => {
@@ -996,9 +1021,9 @@ fn real_main(drm: &mut DrmBackend) {
                         TouchEvent::Down(dn) => {
                             let x = dn.x_transformed(width as u32);
                             let y = dn.y_transformed(height as u32);
-                            if let Some(btn) = layers[active_layer].hit(width, height, x, y, None) {
-                                touches.insert(dn.seat_slot(), (active_layer, btn));
-                                layers[active_layer].buttons[btn]
+                            if let Some(btn) = layer_manager.get_active().hit(width, height, x, y, None) {
+                                touches.insert(dn.seat_slot(), (layer_manager.active_index(), btn));
+                                layer_manager.get_active_mut().buttons[btn]
                                     .1
                                     .set_active(&mut uinput, true);
                             }
@@ -1011,17 +1036,17 @@ fn real_main(drm: &mut DrmBackend) {
                             let x = mtn.x_transformed(width as u32);
                             let y = mtn.y_transformed(height as u32);
                             let (layer, btn) = *touches.get(&mtn.seat_slot()).unwrap();
-                            let hit = layers[active_layer]
+                            let hit = layer_manager.get_active()
                                 .hit(width, height, x, y, Some(btn))
                                 .is_some();
-                            layers[layer].buttons[btn].1.set_active(&mut uinput, hit);
+                            layer_manager.layers[layer].buttons[btn].1.set_active(&mut uinput, hit);
                         }
                         TouchEvent::Up(up) => {
                             if !touches.contains_key(&up.seat_slot()) {
                                 continue;
                             }
                             let (layer, btn) = *touches.get(&up.seat_slot()).unwrap();
-                            layers[layer].buttons[btn].1.set_active(&mut uinput, false);
+                            layer_manager.layers[layer].buttons[btn].1.set_active(&mut uinput, false);
                         }
                         _ => {}
                     }

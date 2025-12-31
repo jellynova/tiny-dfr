@@ -99,6 +99,9 @@ struct ConfigProxy {
     font_template: Option<String>,
     adaptive_brightness: Option<bool>,
     active_brightness: Option<u32>,
+    // New multi-layer format
+    layers: Option<Vec<LayerConfig>>,
+    // Old two-layer format (backward compatibility)
     primary_layer_keys: Option<Vec<ButtonConfig>>,
     media_layer_keys: Option<Vec<ButtonConfig>>,
     colors: Option<ColorConfigProxy>,
@@ -157,6 +160,13 @@ pub struct ButtonConfig {
     pub stretch: Option<usize>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct LayerConfig {
+    pub name: Option<String>,
+    pub buttons: Vec<ButtonConfig>,
+}
+
 fn load_font(name: &str) -> FontFace {
     let fontconfig = FontConfig::new();
     let mut pattern = Pattern::new(name);
@@ -172,7 +182,7 @@ fn load_font(name: &str) -> FontFace {
     FontFace::create_from_ft(&face).unwrap()
 }
 
-fn load_config(width: u16) -> (Config, [FunctionLayer; 2]) {
+fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
     let mut base =
         toml::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.toml").unwrap())
             .unwrap();
@@ -185,18 +195,20 @@ fn load_config(width: u16) -> (Config, [FunctionLayer; 2]) {
         base.enable_pixel_shift = user.enable_pixel_shift.or(base.enable_pixel_shift);
         base.font_template = user.font_template.or(base.font_template);
         base.adaptive_brightness = user.adaptive_brightness.or(base.adaptive_brightness);
+        base.layers = user.layers.or(base.layers);
         base.media_layer_keys = user.media_layer_keys.or(base.media_layer_keys);
         base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
         base.active_brightness = user.active_brightness.or(base.active_brightness);
         base.colors = user.colors.or(base.colors);
     };
-    let mut media_layer_keys = base.media_layer_keys.unwrap();
-    let mut primary_layer_keys = base.primary_layer_keys.unwrap();
-    if width >= 2170 {
-        for layer in [&mut media_layer_keys, &mut primary_layer_keys] {
-            layer.insert(
-                0,
-                ButtonConfig {
+
+    // Support both new multi-layer format and old two-layer format
+    let layers: Vec<FunctionLayer> = if let Some(layer_configs) = base.layers {
+        // New multi-layer format
+        layer_configs.into_iter().map(|mut lc| {
+            // Add esc key if needed
+            if width >= 2170 {
+                lc.buttons.insert(0, ButtonConfig {
                     icon: None,
                     text: Some("esc".into()),
                     theme: None,
@@ -205,17 +217,44 @@ fn load_config(width: u16) -> (Config, [FunctionLayer; 2]) {
                     time: None,
                     locale: None,
                     battery: None,
-                },
-            );
-        }
-    }
-    let media_layer = FunctionLayer::with_config(media_layer_keys);
-    let fkey_layer = FunctionLayer::with_config(primary_layer_keys);
-    let layers = if base.media_layer_default.unwrap() {
-        [media_layer, fkey_layer]
+                });
+            }
+            FunctionLayer::with_config(lc.buttons)
+        }).collect()
     } else {
-        [fkey_layer, media_layer]
+        // Old two-layer format (backward compatibility)
+        let mut media_layer_keys = base.media_layer_keys.unwrap();
+        let mut primary_layer_keys = base.primary_layer_keys.unwrap();
+        if width >= 2170 {
+            for layer in [&mut media_layer_keys, &mut primary_layer_keys] {
+                layer.insert(
+                    0,
+                    ButtonConfig {
+                        icon: None,
+                        text: Some("esc".into()),
+                        theme: None,
+                        action: Key::Esc,
+                        stretch: None,
+                        time: None,
+                        locale: None,
+                        battery: None,
+                    },
+                );
+            }
+        }
+        let media_layer = FunctionLayer::with_config(media_layer_keys);
+        let fkey_layer = FunctionLayer::with_config(primary_layer_keys);
+        if base.media_layer_default.unwrap() {
+            vec![media_layer, fkey_layer]
+        } else {
+            vec![fkey_layer, media_layer]
+        }
     };
+
+    if layers.is_empty() {
+        panic!("Configuration must define at least one layer");
+    }
+
     let cfg = Config {
         show_button_outlines: base.show_button_outlines.unwrap(),
         enable_pixel_shift: base.enable_pixel_shift.unwrap(),
@@ -250,13 +289,13 @@ impl ConfigManager {
             watch_desc,
         }
     }
-    pub fn load_config(&self, width: u16) -> (Config, [FunctionLayer; 2]) {
+    pub fn load_config(&self, width: u16) -> (Config, Vec<FunctionLayer>) {
         load_config(width)
     }
     pub fn update_config(
         &mut self,
         cfg: &mut Config,
-        layers: &mut [FunctionLayer; 2],
+        layers: &mut Vec<FunctionLayer>,
         width: u16,
     ) -> bool {
         if self.watch_desc.is_none() {
@@ -269,7 +308,7 @@ impl ConfigManager {
         }
     }
     #[cold]
-    fn handle_events(&mut self, cfg: &mut Config, layers: &mut [FunctionLayer; 2], width: u16, evts: Result<Vec<InotifyEvent>, Errno>) -> bool {
+    fn handle_events(&mut self, cfg: &mut Config, layers: &mut Vec<FunctionLayer>, width: u16, evts: Result<Vec<InotifyEvent>, Errno>) -> bool {
         let mut ret = false;
         for evt in evts.unwrap() {
             if Some(evt.wd) != self.watch_desc {

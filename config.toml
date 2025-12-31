@@ -1,0 +1,86 @@
+# tiny-dfr Color Template for Matugen
+# This template generates a simple single-color theme using accent color
+# All keys use the same accent color for a unified look
+# Compatible with action-based color override system
+
+# Button Configuration - MUST be at root level to avoid TOML nesting issues
+PrimaryLayerKeys = [
+    { Text = "F1",  Action = "F1"  },
+    { Text = "F2",  Action = "F2"  },
+    { Text = "F3",  Action = "F3"  },
+    { Text = "F4",  Action = "F4"  },
+    { Text = "F5",  Action = "F5"  },
+    { Text = "F6",  Action = "F6"  },
+    { Text = "F7",  Action = "F7"  },
+    { Text = "F8",  Action = "F8"  },
+    { Text = "F9",  Action = "F9"  },
+    { Text = "F10", Action = "F10" },
+    { Text = "F11", Action = "F11" },
+    { Text = "F12", Action = "F12" }
+]
+
+# Media Layer Keys for media selector buttons
+MediaLayerKeys = [
+    { Icon = "brightness_low",  Action = "BrightnessDown" },
+    { Icon = "brightness_high", Action = "BrightnessUp"   },
+    { Icon = "mic_off",         Action = "MicMute"        },
+    { Icon = "search",          Action = "Search"         },
+    { Icon = "backlight_low",   Action = "IllumDown"      },
+    { Icon = "backlight_high",  Action = "IllumUp"        },
+    { Icon = "fast_rewind",     Action = "PreviousSong"   },
+    { Icon = "play_pause",      Action = "PlayPause"      },
+    { Icon = "fast_forward",    Action = "NextSong"       },
+    { Icon = "volume_off",      Action = "Mute"           },
+    { Icon = "volume_down",     Action = "VolumeDown"     },
+    { Icon = "volume_up",       Action = "VolumeUp"       }
+]
+
+# Color Configuration
+[Colors]
+# Default colors using accent color
+# Using raw RGB values (0-255 range) - will be converted by post-processing script
+ButtonBackgroundInactive = [0.525, 0.820, 0.914]
+ButtonBackgroundActive = [0.757, 0.769, 0.922]
+IconColor = [0.000, 0.212, 0.259]
+IconColorActive = [0.165, 0.180, 0.302]
+TextColor = [0.000, 0.212, 0.259]    
+
+# Individual button overrides - all using accent color
+[Colors.ButtonOverrides]
+# Escape key
+"esc" = { ButtonBackgroundInactive = [0.757, 0.769, 0.922], ButtonBackgroundActive = [0.525, 0.820, 0.914], IconColor = [0.000, 0.212, 0.259], IconColorActive = [0.165, 0.180, 0.302] }
+
+# Function keys F1-F12
+#"F1" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F2" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F3" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F4" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F5" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F6" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F7" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F8" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F9" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F10" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F11" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"F12" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+
+# Media keys - all using accent color
+#"BrightnessDown" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"BrightnessUp" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"MicMute" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"Search" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"IllumDown" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"IllumUp" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"PreviousSong" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"PlayPause" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"NextSong" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"Mute" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"VolumeDown" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+#"VolumeUp" = { ButtonBackgroundInactive = [0.525, 0.820, 0.914], ButtonBackgroundActive = [0.525, 0.820, 0.914] }
+
+# This creates a simple unified theme with:
+# - All keys use the same accent color for a clean, consistent look
+# - Escape key and all function keys (F1-F12) are included
+# - All media keys use the same accent color
+# - Compatible with tiny-dfr's action-based color override system
+# - Requires post-processing: run normalize-tiny-dfr-colors.py to convert RGB values
