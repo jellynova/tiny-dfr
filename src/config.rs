@@ -155,6 +155,9 @@ pub struct ButtonConfig {
     pub theme: Option<String>,
     pub time: Option<String>,
     pub battery: Option<String>,
+    pub slider: Option<String>,
+    pub slider_get_command: Option<String>,
+    pub slider_set_command: Option<String>,
     pub locale: Option<String>,
     pub action: Key,
     pub stretch: Option<usize>,
@@ -217,6 +220,9 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                     time: None,
                     locale: None,
                     battery: None,
+                    slider: None,
+                    slider_get_command: None,
+                    slider_set_command: None,
                 });
             }
             FunctionLayer::with_config(lc.buttons)
@@ -238,6 +244,9 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                         time: None,
                         locale: None,
                         battery: None,
+                        slider: None,
+                        slider_get_command: None,
+                        slider_set_command: None,
                     },
                 );
             }

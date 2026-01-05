@@ -34,6 +34,7 @@ use std::{
     },
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
+    time::Instant,
 };
 use udev::MonitorBuilder;
 
@@ -83,12 +84,28 @@ impl BatteryIconMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SliderType {
+    Volume,
+    Brightness,
+    KeyboardBacklight,
+}
+
+struct SliderConfig {
+    slider_type: SliderType,
+    icon: Handle,
+    get_command: Option<String>,
+    set_command: Option<String>,
+}
+
 enum ButtonImage {
     Text(String),
     Svg(Handle),
     Bitmap(ImageSurface),
     Time(Vec<ChronoItem<'static>>, Locale),
     Battery(String, BatteryIconMode, BatteryImages),
+    Slider(SliderConfig),
+    SliderText(SliderType, String),
 }
 
 struct Button {
@@ -240,7 +257,17 @@ fn get_battery_state(battery: &str) -> (u32, BatteryState) {
 
 impl Button {
     fn with_config(cfg: ButtonConfig) -> Button {
-        if let Some(text) = cfg.text {
+        if let Some(slider_type) = cfg.slider {
+            Button::new_slider(
+                cfg.action,
+                &slider_type,
+                cfg.text,
+                cfg.icon,
+                cfg.theme,
+                cfg.slider_get_command,
+                cfg.slider_set_command,
+            )
+        } else if let Some(text) = cfg.text {
             Button::new_text(text, cfg.action)
         } else if let Some(icon) = cfg.icon {
             Button::new_icon(&icon, cfg.theme, cfg.action)
@@ -253,7 +280,7 @@ impl Button {
                 Button::new_text("Battery N/A".to_string(), cfg.action)
             }
         } else {
-            panic!("Invalid config, a button must have either Text, Icon or Time")
+            panic!("Invalid config, a button must have either Text, Icon, Time, Battery, or Slider")
         }
     }
     fn new_text(text: String, action: Key) -> Button {
@@ -334,6 +361,81 @@ impl Button {
             image: ButtonImage::Time(format_items, locale),
         }
     }
+
+    fn new_slider(
+        action: Key,
+        slider_type: &str,
+        text: Option<String>,
+        icon: Option<String>,
+        theme: Option<impl AsRef<str>>,
+        get_command: Option<String>,
+        set_command: Option<String>,
+    ) -> Button {
+        let slider_type_enum = match slider_type {
+            "Volume" => SliderType::Volume,
+            "Brightness" => SliderType::Brightness,
+            "KeyboardBacklight" => SliderType::KeyboardBacklight,
+            _ => panic!("Invalid slider type: {}, expected Volume, Brightness, or KeyboardBacklight", slider_type),
+        };
+
+        // Prefer icon over text if both provided
+        if let Some(icon_name) = icon {
+            let image = try_load_image(icon_name, theme).expect("failed to load slider icon");
+            let icon_handle = match image {
+                ButtonImage::Svg(h) => h,
+                _ => panic!("Slider icons must be SVG"),
+            };
+
+            return Button {
+                action,
+                active: false,
+                changed: false,
+                image: ButtonImage::Slider(SliderConfig {
+                    slider_type: slider_type_enum,
+                    icon: icon_handle,
+                    get_command,
+                    set_command,
+                }),
+            };
+        }
+
+        // If text is provided, create a text-based slider
+        if let Some(text) = text {
+            return Button {
+                action,
+                active: false,
+                changed: false,
+                image: ButtonImage::SliderText(slider_type_enum, text),
+            };
+        }
+
+        // Otherwise use default icon for the slider type
+        let default_icon = match slider_type {
+            "Volume" => "volume_up",
+            "Brightness" => "brightness_high",
+            "KeyboardBacklight" => "backlight_high",
+            _ => unreachable!(),
+        };
+
+        let image = try_load_image(default_icon, theme).expect("failed to load slider icon");
+        let icon_handle = match image {
+            ButtonImage::Svg(h) => h,
+            _ => panic!("Slider icons must be SVG"),
+        };
+
+        Button {
+            action,
+            active: false,
+            changed: false,
+            image: ButtonImage::Slider(SliderConfig {
+                slider_type: slider_type_enum,
+                icon: icon_handle,
+                get_command,
+                set_command,
+            }),
+        }
+    }
+
     fn render(
         &self,
         c: &Context,
@@ -434,6 +536,24 @@ impl Button {
                     c.show_text(&percent_str).unwrap();
                 }
             }
+            ButtonImage::Slider(slider_cfg) => {
+                // Render slider icon (overlay will be shown on interaction)
+                let x =
+                    button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
+                let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
+
+                self.render_svg_with_color(c, &slider_cfg.icon, x, y, config, self.active);
+            }
+            ButtonImage::SliderText(_, text) => {
+                // Render slider text (overlay will be shown on interaction)
+                self.set_text_color(c, config);
+                let extents = c.text_extents(text).unwrap();
+                c.move_to(
+                    button_left_edge + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
+                    y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
+                );
+                c.show_text(text).unwrap();
+            }
         }
     }
     fn render_svg_with_color(&self, c: &Context, svg: &Handle, x: f64, y: f64, config: &crate::config::Config, is_active: bool) {
@@ -495,6 +615,12 @@ impl Button {
             ButtonImage::Battery(_, _, _) => "Battery".to_string(),
             ButtonImage::Svg(_) => self.key_to_action_string(),
             ButtonImage::Bitmap(_) => self.key_to_action_string(),
+            ButtonImage::Slider(slider_cfg) => match slider_cfg.slider_type {
+                SliderType::Volume => "Volume".to_string(),
+                SliderType::Brightness => "Brightness".to_string(),
+                SliderType::KeyboardBacklight => "KeyboardBacklight".to_string(),
+            },
+            ButtonImage::SliderText(_, text) => text.clone(),
         }
     }
 
@@ -578,6 +704,7 @@ impl FunctionLayer {
         surface: &Surface,
         pixel_shift: (f64, f64),
         complete_redraw: bool,
+        slider_overlay: &SliderOverlay,
     ) -> Vec<ClipRect> {
         let c = Context::new(surface).unwrap();
         let mut modified_regions = if complete_redraw {
@@ -710,6 +837,9 @@ impl FunctionLayer {
             }
         }
 
+        // Render slider overlay on top if active
+        render_slider_overlay(&c, width, height, slider_overlay, config, self);
+
         modified_regions
     }
 
@@ -755,6 +885,249 @@ impl FunctionLayer {
     }
 }
 
+// Touch gesture detection constants
+const TAP_HOLD_THRESHOLD_MS: u128 = 300;
+const DRAG_THRESHOLD_PX: f64 = 10.0;
+const SLIDER_DISMISS_MS: u128 = 2000;
+const SLIDER_WIDTH_PX: f64 = 300.0;  // Fixed slider width
+
+// Touch state tracking for slider gestures
+struct TouchState {
+    down_time: Instant,
+    down_x: f64,
+    down_y: f64,
+    is_dragging: bool,
+    layer: usize,
+    button: usize,
+    last_slider_value: f32,  // Track last slider position for delta calculation
+}
+
+// Slider overlay state
+struct SliderOverlay {
+    active: bool,
+    slider_type: SliderType,
+    value: f32,  // 0.0 to 1.0
+    dismiss_time: Instant,
+    button_text: String,  // For color lookup
+    button_index: usize,  // Which button to position over
+    tracked_volume: f32,  // Track volume internally since we can't reliably read it
+}
+
+impl SliderOverlay {
+    fn new() -> Self {
+        Self {
+            active: false,
+            slider_type: SliderType::Volume,
+            value: 0.0,
+            dismiss_time: Instant::now(),
+            button_text: String::new(),
+            button_index: 0,
+            tracked_volume: 0.5,  // Start at 50%, update as we make changes
+        }
+    }
+
+    fn show(&mut self, slider_type: SliderType, value: f32, button_text: String, button_index: usize) {
+        self.active = true;
+        self.slider_type = slider_type;
+        self.value = value;
+        self.dismiss_time = Instant::now();
+        self.button_text = button_text;
+        self.button_index = button_index;
+    }
+
+    fn update_tracked_volume(&mut self, value: f32) {
+        self.tracked_volume = value;
+    }
+
+    fn get_tracked_volume(&self) -> f32 {
+        self.tracked_volume
+    }
+
+    fn dismiss(&mut self) {
+        self.active = false;
+    }
+
+    fn update(&mut self) -> bool {
+        if self.active && self.dismiss_time.elapsed().as_millis() > SLIDER_DISMISS_MS {
+            self.active = false;
+            return true;  // needs redraw
+        }
+        false
+    }
+
+    // Calculate slider bounds - returns (x, y, width, height)
+    fn get_bounds(&self, layer: &FunctionLayer, width: i32, height: i32) -> (f64, f64, f64, f64) {
+        let virtual_button_width = (width as i32 - (BUTTON_SPACING_PX * (layer.virtual_button_count - 1) as i32)) as f64
+            / layer.virtual_button_count as f64;
+
+        let start = layer.buttons[self.button_index].0;
+        let end = if self.button_index + 1 < layer.buttons.len() {
+            layer.buttons[self.button_index + 1].0
+        } else {
+            layer.virtual_button_count
+        };
+
+        let button_left_edge = (start as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64)).floor();
+        let button_width = virtual_button_width
+            + ((end - start - 1) as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64)).floor();
+
+        // Fixed slider width, centered on button
+        let slider_width = SLIDER_WIDTH_PX;
+        let button_center = button_left_edge + button_width / 2.0;
+        let slider_x = (button_center - slider_width / 2.0).max(0.0).min(width as f64 - slider_width);
+
+        let slider_height = height as f64 * 0.85;
+        let slider_y = (height as f64 - slider_height) / 2.0;
+
+        (slider_x, slider_y, slider_width, slider_height)
+    }
+
+    // Check if a touch position is within the slider bounds
+    fn contains_point(&self, layer: &FunctionLayer, width: i32, height: i32, x: f64, y: f64) -> bool {
+        let (slider_x, slider_y, slider_width, slider_height) = self.get_bounds(layer, width, height);
+        x >= slider_x && x <= slider_x + slider_width &&
+        y >= slider_y && y <= slider_y + slider_height
+    }
+
+    // Convert touch x position to slider value (0.0 to 1.0)
+    fn position_to_value(&self, layer: &FunctionLayer, width: i32, height: i32, x: f64) -> f32 {
+        let (slider_x, _, slider_width, _) = self.get_bounds(layer, width, height);
+        ((x - slider_x) / slider_width).clamp(0.0, 1.0) as f32
+    }
+}
+
+// Helper functions for sysfs operations
+fn read_sysfs_u32(path: &str) -> Result<u32> {
+    let content = fs::read_to_string(path)?;
+    content.trim().parse::<u32>()
+        .map_err(|e| anyhow!("Failed to parse {}: {}", path, e))
+}
+
+fn write_sysfs_u32(path: &str, value: u32) -> Result<()> {
+    fs::write(path, value.to_string())?;
+    Ok(())
+}
+
+// Get current slider value (0.0 to 1.0)
+fn get_slider_value(slider_type: &SliderType, get_command: Option<&String>) -> f32 {
+    use std::process::Command;
+
+    // Use custom command if provided
+    if let Some(cmd) = get_command {
+        match Command::new("sh").args(&["-c", cmd]).output() {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Ok(value) = stdout.trim().parse::<f32>() {
+                    return (value / 100.0).clamp(0.0, 1.0);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    // Fall back to hardcoded behavior
+    match slider_type {
+        SliderType::Brightness => {
+            let max_path = "/sys/class/backlight/acpi_video0/max_brightness";
+            let cur_path = "/sys/class/backlight/acpi_video0/brightness";
+            match (read_sysfs_u32(max_path), read_sysfs_u32(cur_path)) {
+                (Ok(max), Ok(cur)) if max > 0 => cur as f32 / max as f32,
+                _ => 0.5,
+            }
+        }
+        SliderType::KeyboardBacklight => {
+            let max_path = "/sys/class/leds/apple::kbd_backlight/max_brightness";
+            let cur_path = "/sys/class/leds/apple::kbd_backlight/brightness";
+            match (read_sysfs_u32(max_path), read_sysfs_u32(cur_path)) {
+                (Ok(max), Ok(cur)) if max > 0 => cur as f32 / max as f32,
+                _ => 0.5,
+            }
+        }
+        SliderType::Volume => {
+            // Try to read volume with wpctl, default to 50% if unavailable
+            match Command::new("/usr/bin/wpctl")
+                .env("XDG_RUNTIME_DIR", "/run/user/1000")
+                .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+                .args(&["get-volume", "@DEFAULT_AUDIO_SINK@"])
+                .output() {
+                Ok(output) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Output format: "Volume: 0.50"
+                    if let Some(vol_str) = stdout.strip_prefix("Volume: ") {
+                        if let Ok(value) = vol_str.trim().parse::<f32>() {
+                            return value.clamp(0.0, 1.0);
+                        }
+                    }
+                    0.5  // Default if parse fails
+                }
+                _ => 0.5,  // Default if command fails
+            }
+        }
+    }
+}
+
+// Set slider value (0.0 to 1.0)
+// For volume, uses delta-based key events; for others, uses direct sysfs writes
+fn set_slider_value<F>(slider_type: &SliderType, value: f32, prev_value: f32, set_command: Option<&String>, uinput: &mut UInputHandle<F>)
+where
+    F: AsRawFd,
+{
+    use std::process::Command;
+    let clamped_value = value.clamp(0.0, 1.0);
+    let percent = (clamped_value * 100.0) as u32;
+
+    // Use custom command if provided
+    if let Some(cmd) = set_command {
+        let cmd_with_value = cmd.replace("{}", &percent.to_string());
+        let _ = Command::new("sh").args(&["-c", &cmd_with_value]).output();
+        return;
+    }
+
+    // Fall back to hardcoded behavior
+    match slider_type {
+        SliderType::Brightness => {
+            let max_path = "/sys/class/backlight/acpi_video0/max_brightness";
+            let cur_path = "/sys/class/backlight/acpi_video0/brightness";
+            if let Ok(max) = read_sysfs_u32(max_path) {
+                let new_value = (clamped_value * max as f32) as u32;
+                let _ = write_sysfs_u32(cur_path, new_value);
+            }
+        }
+        SliderType::KeyboardBacklight => {
+            let max_path = "/sys/class/leds/apple::kbd_backlight/max_brightness";
+            let cur_path = "/sys/class/leds/apple::kbd_backlight/brightness";
+            if let Ok(max) = read_sysfs_u32(max_path) {
+                let new_value = (clamped_value * max as f32) as u32;
+                let _ = write_sysfs_u32(cur_path, new_value);
+            }
+        }
+        SliderType::Volume => {
+            // Use VolumeUp/VolumeDown key events for reliable control
+            // Each key press changes volume by ~5%, so calculate steps needed
+            let target_percent = (clamped_value * 100.0).round() as i32;
+            let current_percent = (prev_value * 100.0).round() as i32;
+            let diff = target_percent - current_percent;
+
+            // Each volume key press is approximately 5%
+            let steps = (diff as f32 / 5.0).round() as i32;
+
+            if steps > 0 {
+                // Volume up
+                for _ in 0..steps {
+                    toggle_key(uinput, Key::VolumeUp, 1);
+                    toggle_key(uinput, Key::VolumeUp, 0);
+                }
+            } else if steps < 0 {
+                // Volume down
+                for _ in 0..(-steps) {
+                    toggle_key(uinput, Key::VolumeDown, 1);
+                    toggle_key(uinput, Key::VolumeDown, 0);
+                }
+            }
+        }
+    }
+}
+
 struct LayerManager {
     layers: Vec<FunctionLayer>,
     active_layer: usize,
@@ -784,6 +1157,65 @@ impl LayerManager {
     fn active_index(&self) -> usize {
         self.active_layer
     }
+}
+
+// Render slider overlay on top of the display
+fn render_slider_overlay(
+    c: &Context,
+    width: i32,
+    height: i32,
+    overlay: &SliderOverlay,
+    config: &Config,
+    layer: &FunctionLayer,
+) {
+    if !overlay.active {
+        return;
+    }
+
+    // Get button colors for this slider
+    let (bg_inactive, bg_active, _, _, text_color) =
+        config.colors.get_button_colors(&overlay.button_text);
+
+    // Get slider bounds
+    let (slider_x, slider_y, slider_width, slider_height) = overlay.get_bounds(layer, width, height);
+
+    // Draw track background (inactive button color) with rounded corners
+    c.set_source_rgb(bg_inactive[0], bg_inactive[1], bg_inactive[2]);
+    draw_rounded_rectangle(c, slider_x, slider_y, slider_width, slider_height, slider_height / 2.0);
+    c.fill().unwrap();
+
+    // Draw filled portion (active button color) with rounded end
+    let fill_width = slider_width * overlay.value as f64;
+    if fill_width > 0.0 {
+        c.set_source_rgb(bg_active[0], bg_active[1], bg_active[2]);
+        draw_rounded_rectangle(c, slider_x, slider_y, fill_width, slider_height, slider_height / 2.0);
+        c.fill().unwrap();
+    }
+
+    // Draw percentage text
+    let percent = (overlay.value * 100.0) as i32;
+    let text = format!("{}%", percent);
+    c.set_source_rgb(text_color[0], text_color[1], text_color[2]);
+    c.set_font_size(20.0);
+
+    let extents = c.text_extents(&text).unwrap();
+    let text_x = slider_x + (slider_width - extents.width()) / 2.0;
+    let text_y = slider_y + (slider_height + extents.height()) / 2.0;
+
+    c.move_to(text_x, text_y);
+    c.show_text(&text).unwrap();
+}
+
+// Helper to draw rounded rectangles
+fn draw_rounded_rectangle(c: &Context, x: f64, y: f64, width: f64, height: f64, radius: f64) {
+    let radius = radius.min(width / 2.0).min(height / 2.0);
+
+    c.new_path();
+    c.arc(x + radius, y + radius, radius, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+    c.arc(x + width - radius, y + radius, radius, 1.5 * std::f64::consts::PI, 2.0 * std::f64::consts::PI);
+    c.arc(x + width - radius, y + height - radius, radius, 0.0, 0.5 * std::f64::consts::PI);
+    c.arc(x + radius, y + height - radius, radius, 0.5 * std::f64::consts::PI, std::f64::consts::PI);
+    c.close_path();
 }
 
 struct Interface;
@@ -871,7 +1303,7 @@ fn real_main(drm: &mut DrmBackend) {
     let (mut cfg, layers) = cfg_mgr.load_config(width);
     let mut pixel_shift = PixelShiftManager::new();
 
-    // drop privileges to input and video group
+    // drop privileges to input and video groups
     let groups = ["input", "video"];
 
     PrivDrop::default()
@@ -934,7 +1366,8 @@ fn real_main(drm: &mut DrmBackend) {
     uinput.dev_create().unwrap();
 
     let mut digitizer: Option<InputDevice> = None;
-    let mut touches = HashMap::new();
+    let mut touches: HashMap<i32, TouchState> = HashMap::new();
+    let mut slider_overlay = SliderOverlay::new();
     loop {
         if cfg_mgr.update_config(&mut cfg, &mut layer_manager.layers, width) {
             layer_manager.active_layer = 0;
@@ -951,6 +1384,11 @@ fn real_main(drm: &mut DrmBackend) {
                 needs_complete_redraw = true;
             }
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
+        }
+
+        // Update slider overlay auto-dismiss
+        if slider_overlay.update() {
+            needs_complete_redraw = true;
         }
 
         let current_minute = now.minute();
@@ -979,6 +1417,7 @@ fn real_main(drm: &mut DrmBackend) {
                 &surface,
                 shift,
                 needs_complete_redraw,
+                &slider_overlay,
             );
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
@@ -1009,6 +1448,10 @@ fn real_main(drm: &mut DrmBackend) {
                 }
                 Event::Keyboard(KeyboardEvent::Key(key)) => {
                     if key.key() == Key::Fn as u32 && key.key_state() == KeyState::Pressed {
+                        // Dismiss slider overlay if active
+                        if slider_overlay.active {
+                            slider_overlay.dismiss();
+                        }
                         layer_manager.cycle_layer();
                         needs_complete_redraw = true;
                     }
@@ -1022,31 +1465,149 @@ fn real_main(drm: &mut DrmBackend) {
                             let x = dn.x_transformed(width as u32);
                             let y = dn.y_transformed(height as u32);
                             if let Some(btn) = layer_manager.get_active().hit(width, height, x, y, None) {
-                                touches.insert(dn.seat_slot(), (layer_manager.active_index(), btn));
-                                layer_manager.get_active_mut().buttons[btn]
-                                    .1
-                                    .set_active(&mut uinput, true);
+                                touches.insert(dn.seat_slot() as i32, TouchState {
+                                    down_time: Instant::now(),
+                                    down_x: x,
+                                    down_y: y,
+                                    is_dragging: false,
+                                    layer: layer_manager.active_index(),
+                                    button: btn,
+                                    last_slider_value: (x / width as f64).clamp(0.0, 1.0) as f32,
+                                });
+
+                                // Don't show active state for slider buttons
+                                let is_slider = matches!(
+                                    layer_manager.get_active().buttons[btn].1.image,
+                                    ButtonImage::Slider(_) | ButtonImage::SliderText(_, _)
+                                );
+                                if !is_slider {
+                                    layer_manager.get_active_mut().buttons[btn]
+                                        .1
+                                        .set_active(&mut uinput, true);
+                                }
                             }
                         }
                         TouchEvent::Motion(mtn) => {
-                            if !touches.contains_key(&mtn.seat_slot()) {
+                            let slot = mtn.seat_slot() as i32;
+                            if !touches.contains_key(&slot) {
                                 continue;
                             }
 
                             let x = mtn.x_transformed(width as u32);
                             let y = mtn.y_transformed(height as u32);
-                            let (layer, btn) = *touches.get(&mtn.seat_slot()).unwrap();
-                            let hit = layer_manager.get_active()
-                                .hit(width, height, x, y, Some(btn))
-                                .is_some();
-                            layer_manager.layers[layer].buttons[btn].1.set_active(&mut uinput, hit);
+                            let touch_state = touches.get_mut(&slot).unwrap();
+                            let layer = touch_state.layer;
+                            let btn = touch_state.button;
+
+                            // Check if this is a slider button and handle gesture detection
+                            let is_slider = matches!(
+                                layer_manager.layers[layer].buttons[btn].1.image,
+                                ButtonImage::Slider(_) | ButtonImage::SliderText(_, _)
+                            );
+
+                            if is_slider && !touch_state.is_dragging {
+                                // Check if we should start dragging
+                                let elapsed = touch_state.down_time.elapsed().as_millis();
+                                let dx = (x - touch_state.down_x).abs();
+                                let dy = (y - touch_state.down_y).abs();
+                                let distance = (dx * dx + dy * dy).sqrt();
+
+                                if elapsed > TAP_HOLD_THRESHOLD_MS || distance > DRAG_THRESHOLD_PX {
+                                    touch_state.is_dragging = true;
+                                }
+                            }
+
+                            if is_slider && touch_state.is_dragging {
+                                // Get slider type and commands from button
+                                let (slider_type, get_cmd, set_cmd) = match &layer_manager.layers[layer].buttons[btn].1.image {
+                                    ButtonImage::Slider(ref cfg) => (Some(cfg.slider_type), cfg.get_command.as_ref(), cfg.set_command.as_ref()),
+                                    ButtonImage::SliderText(ref typ, _) => (Some(*typ), None, None),
+                                    _ => (None, None, None),
+                                };
+
+                                if let Some(slider_type) = slider_type {
+                                    // Show overlay if not already shown
+                                    if !slider_overlay.active {
+                                        let button_text = layer_manager.layers[layer].buttons[btn].1.get_text();
+                                        // For volume, use tracked value; for others, read from system
+                                        let current_value = if matches!(slider_type, SliderType::Volume) {
+                                            slider_overlay.get_tracked_volume()
+                                        } else {
+                                            get_slider_value(&slider_type, get_cmd)
+                                        };
+                                        // Initialize last_slider_value to actual current value
+                                        touch_state.last_slider_value = current_value;
+                                        slider_overlay.show(slider_type, current_value, button_text, btn);
+                                    }
+
+                                    // Only process touch if within slider bounds
+                                    if slider_overlay.contains_point(&layer_manager.layers[layer], width as i32, height as i32, x, y) {
+                                        // Calculate slider value based on position within slider bounds
+                                        let slider_value = slider_overlay.position_to_value(&layer_manager.layers[layer], width as i32, height as i32, x);
+
+                                        // Set the system value based on delta from last position
+                                        let prev_value = touch_state.last_slider_value;
+                                        set_slider_value(&slider_type, slider_value, prev_value, set_cmd, &mut uinput);
+                                        touch_state.last_slider_value = slider_value;
+
+                                        // Update tracked volume for next time
+                                        if matches!(slider_type, SliderType::Volume) {
+                                            slider_overlay.update_tracked_volume(slider_value);
+                                        }
+
+                                        let button_text = layer_manager.layers[layer].buttons[btn].1.get_text();
+                                        slider_overlay.show(slider_type, slider_value, button_text, btn);
+                                        needs_complete_redraw = true;
+                                    }
+                                }
+                            } else {
+                                // Regular button hit detection (only for non-sliders)
+                                let hit = layer_manager.get_active()
+                                    .hit(width, height, x, y, Some(btn))
+                                    .is_some();
+                                if !is_slider {
+                                    layer_manager.layers[layer].buttons[btn].1.set_active(&mut uinput, hit);
+                                }
+                            }
                         }
                         TouchEvent::Up(up) => {
-                            if !touches.contains_key(&up.seat_slot()) {
+                            let slot = up.seat_slot() as i32;
+                            if !touches.contains_key(&slot) {
                                 continue;
                             }
-                            let (layer, btn) = *touches.get(&up.seat_slot()).unwrap();
-                            layer_manager.layers[layer].buttons[btn].1.set_active(&mut uinput, false);
+                            let touch_state = touches.remove(&slot).unwrap();
+                            let layer = touch_state.layer;
+                            let btn = touch_state.button;
+
+                            // Check if this was a short tap on a slider (show overlay for viewing)
+                            let is_slider = matches!(
+                                layer_manager.layers[layer].buttons[btn].1.image,
+                                ButtonImage::Slider(_) | ButtonImage::SliderText(_, _)
+                            );
+
+                            if is_slider && !touch_state.is_dragging {
+                                let elapsed = touch_state.down_time.elapsed().as_millis();
+                                if elapsed < TAP_HOLD_THRESHOLD_MS {
+                                    // Short tap - show current value in overlay
+                                    let (slider_type, get_cmd, _set_cmd) = match &layer_manager.layers[layer].buttons[btn].1.image {
+                                        ButtonImage::Slider(ref cfg) => (Some(cfg.slider_type), cfg.get_command.as_ref(), cfg.set_command.as_ref()),
+                                        ButtonImage::SliderText(ref typ, _) => (Some(*typ), None, None),
+                                        _ => (None, None, None),
+                                    };
+
+                                    if let Some(slider_type) = slider_type {
+                                        let current_value = get_slider_value(&slider_type, get_cmd);
+                                        let button_text = layer_manager.layers[layer].buttons[btn].1.get_text();
+                                        slider_overlay.show(slider_type, current_value, button_text, btn);
+                                        needs_complete_redraw = true;
+                                    }
+                                }
+                            }
+
+                            // Don't call set_active for sliders
+                            if !is_slider {
+                                layer_manager.layers[layer].buttons[btn].1.set_active(&mut uinput, false);
+                            }
                         }
                         _ => {}
                     }
