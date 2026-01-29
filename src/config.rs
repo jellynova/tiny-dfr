@@ -88,6 +88,7 @@ pub struct Config {
     pub adaptive_brightness: bool,
     pub active_brightness: u32,
     pub colors: ColorConfig,
+    pub hyprland: HyprlandConfig,
 }
 
 #[derive(Deserialize)]
@@ -105,6 +106,7 @@ struct ConfigProxy {
     primary_layer_keys: Option<Vec<ButtonConfig>>,
     media_layer_keys: Option<Vec<ButtonConfig>>,
     colors: Option<ColorConfigProxy>,
+    hyprland: Option<HyprlandConfig>,
 }
 
 #[derive(Deserialize, Default)]
@@ -161,6 +163,15 @@ pub struct ButtonConfig {
     pub locale: Option<String>,
     pub action: Key,
     pub stretch: Option<usize>,
+    pub hyprland_workspaces: Option<bool>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct HyprlandConfig {
+    pub enabled: Option<bool>,
+    pub screenshot_command: Option<String>,
+    pub refresh_interval_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -203,6 +214,7 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
         base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
         base.active_brightness = user.active_brightness.or(base.active_brightness);
         base.colors = user.colors.or(base.colors);
+        base.hyprland = user.hyprland.or(base.hyprland);
     };
 
     // Support both new multi-layer format and old two-layer format
@@ -223,6 +235,7 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                     slider: None,
                     slider_get_command: None,
                     slider_set_command: None,
+                    hyprland_workspaces: None,
                 });
             }
             FunctionLayer::with_config(lc.buttons)
@@ -247,6 +260,7 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                         slider: None,
                         slider_get_command: None,
                         slider_set_command: None,
+                        hyprland_workspaces: None,
                     },
                 );
             }
@@ -271,6 +285,7 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
         font_face: load_font(&base.font_template.unwrap()),
         active_brightness: base.active_brightness.unwrap(),
         colors: base.colors.unwrap_or_default().to_color_config(),
+        hyprland: base.hyprland.unwrap_or_default(),
     };
     (cfg, layers)
 }

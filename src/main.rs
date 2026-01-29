@@ -22,6 +22,7 @@ use nix::{
         epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags},
         signal::{SigSet, Signal},
     },
+    unistd::geteuid,
 };
 use privdrop::PrivDrop;
 use std::{
@@ -42,12 +43,14 @@ mod backlight;
 mod config;
 mod display;
 mod fonts;
+mod hyprland;
 mod pixel_shift;
 
 use crate::config::ConfigManager;
 use backlight::BacklightManager;
 use config::{ButtonConfig, Config};
 use display::DrmBackend;
+use hyprland::{HyprlandClient, ScreenshotCache, WorkspaceInfo};
 use pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
 
 const BUTTON_SPACING_PX: i32 = 16;
@@ -106,6 +109,7 @@ enum ButtonImage {
     Battery(String, BatteryIconMode, BatteryImages),
     Slider(SliderConfig),
     SliderText(SliderType, String),
+    HyprlandWorkspaces(Option<Handle>),
 }
 
 struct Button {
@@ -257,7 +261,9 @@ fn get_battery_state(battery: &str) -> (u32, BatteryState) {
 
 impl Button {
     fn with_config(cfg: ButtonConfig) -> Button {
-        if let Some(slider_type) = cfg.slider {
+        if cfg.hyprland_workspaces == Some(true) {
+            Button::new_hyprland_workspaces(cfg.action, cfg.icon, cfg.theme)
+        } else if let Some(slider_type) = cfg.slider {
             Button::new_slider(
                 cfg.action,
                 &slider_type,
@@ -280,7 +286,7 @@ impl Button {
                 Button::new_text("Battery N/A".to_string(), cfg.action)
             }
         } else {
-            panic!("Invalid config, a button must have either Text, Icon, Time, Battery, or Slider")
+            panic!("Invalid config, a button must have either Text, Icon, Time, Battery, Slider, or HyprlandWorkspaces")
         }
     }
     fn new_text(text: String, action: Key) -> Button {
@@ -436,6 +442,22 @@ impl Button {
         }
     }
 
+    fn new_hyprland_workspaces(action: Key, icon: Option<String>, theme: Option<impl AsRef<str>>) -> Button {
+        // Use provided icon or fall back to a default
+        let icon_name = icon.unwrap_or_else(|| "view-grid".to_string());
+        let icon_handle = match try_load_image(&icon_name, theme) {
+            Ok(ButtonImage::Svg(h)) => Some(h),
+            _ => None,
+        };
+
+        Button {
+            action,
+            active: false,
+            changed: false,
+            image: ButtonImage::HyprlandWorkspaces(icon_handle),
+        }
+    }
+
     fn render(
         &self,
         c: &Context,
@@ -554,6 +576,25 @@ impl Button {
                 );
                 c.show_text(text).unwrap();
             }
+            ButtonImage::HyprlandWorkspaces(maybe_svg) => {
+                // Render workspace icon or fallback text
+                if let Some(svg) = maybe_svg {
+                    let x =
+                        button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
+                    let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
+                    self.render_svg_with_color(c, svg, x, y, config, self.active);
+                } else {
+                    // Fallback: render "WS" text
+                    self.set_text_color(c, config);
+                    let text = "WS";
+                    let extents = c.text_extents(text).unwrap();
+                    c.move_to(
+                        button_left_edge + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
+                        y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
+                    );
+                    c.show_text(text).unwrap();
+                }
+            }
         }
     }
     fn render_svg_with_color(&self, c: &Context, svg: &Handle, x: f64, y: f64, config: &crate::config::Config, is_active: bool) {
@@ -621,6 +662,7 @@ impl Button {
                 SliderType::KeyboardBacklight => "KeyboardBacklight".to_string(),
             },
             ButtonImage::SliderText(_, text) => text.clone(),
+            ButtonImage::HyprlandWorkspaces(_) => "HyprlandWorkspaces".to_string(),
         }
     }
 
@@ -705,6 +747,7 @@ impl FunctionLayer {
         pixel_shift: (f64, f64),
         complete_redraw: bool,
         slider_overlay: &SliderOverlay,
+        workspace_overlay: &WorkspaceOverlay,
     ) -> Vec<ClipRect> {
         let c = Context::new(surface).unwrap();
         let mut modified_regions = if complete_redraw {
@@ -837,8 +880,12 @@ impl FunctionLayer {
             }
         }
 
-        // Render slider overlay on top if active
-        render_slider_overlay(&c, width, height, slider_overlay, config, self);
+        // Render overlays on top if active (workspace overlay takes precedence)
+        if workspace_overlay.active {
+            render_workspace_overlay(&c, width, height, workspace_overlay, config);
+        } else {
+            render_slider_overlay(&c, width, height, slider_overlay, config, self);
+        }
 
         modified_regions
     }
@@ -993,6 +1040,112 @@ impl SliderOverlay {
     fn position_to_value(&self, layer: &FunctionLayer, width: i32, height: i32, x: f64) -> f32 {
         let (slider_x, _, slider_width, _) = self.get_bounds(layer, width, height);
         ((x - slider_x) / slider_width).clamp(0.0, 1.0) as f32
+    }
+}
+
+// Workspace overlay constants
+const WORKSPACE_OVERLAY_TIMEOUT_MS: u128 = 10000;
+const WORKSPACE_THUMBNAIL_SPACING_PX: f64 = 4.0;
+const WORKSPACE_THUMBNAIL_HEIGHT_RATIO: f64 = 0.85;
+
+// Workspace overlay state
+struct WorkspaceOverlay {
+    active: bool,
+    workspaces: Vec<WorkspaceInfo>,
+    dismiss_time: Instant,
+    selected_workspace: Option<i32>,
+    hyprland: HyprlandClient,
+    screenshot_cache: ScreenshotCache,
+}
+
+impl WorkspaceOverlay {
+    fn new(config: &Config, hyprland_socket: Option<String>) -> Self {
+        let refresh_interval = config.hyprland.refresh_interval_ms.unwrap_or(5000);
+        let screenshot_command = config.hyprland.screenshot_command.clone();
+
+        Self {
+            active: false,
+            workspaces: Vec::new(),
+            dismiss_time: Instant::now(),
+            selected_workspace: None,
+            hyprland: HyprlandClient::new(hyprland_socket),
+            screenshot_cache: ScreenshotCache::new(refresh_interval, screenshot_command),
+        }
+    }
+
+    fn is_enabled(&self, config: &Config) -> bool {
+        config.hyprland.enabled.unwrap_or(true) && self.hyprland.is_available()
+    }
+
+    fn show(&mut self, height: i32) {
+        self.active = true;
+        self.dismiss_time = Instant::now();
+        self.selected_workspace = None;
+
+        // Refresh workspace list
+        self.workspaces = self.hyprland.get_workspaces();
+
+        // Refresh screenshots if needed
+        let target_height = (height as f64 * WORKSPACE_THUMBNAIL_HEIGHT_RATIO) as i32;
+        if self.screenshot_cache.needs_refresh() || self.screenshot_cache.get(0).is_none() {
+            self.screenshot_cache.refresh(&self.workspaces, target_height);
+        }
+    }
+
+    fn dismiss(&mut self) {
+        self.active = false;
+        self.selected_workspace = None;
+    }
+
+    fn update(&mut self) -> bool {
+        if self.active && self.dismiss_time.elapsed().as_millis() > WORKSPACE_OVERLAY_TIMEOUT_MS {
+            self.active = false;
+            return true; // needs redraw
+        }
+        false
+    }
+
+    fn hit_test(&self, x: f64, width: i32, height: i32) -> Option<i32> {
+        if !self.active || self.workspaces.is_empty() {
+            return None;
+        }
+
+        let workspace_count = self.workspaces.len();
+        let total_spacing = WORKSPACE_THUMBNAIL_SPACING_PX * (workspace_count - 1) as f64;
+        let thumbnail_width = (width as f64 - total_spacing) / workspace_count as f64;
+
+        // Calculate dimensions
+        let thumbnail_height = height as f64 * WORKSPACE_THUMBNAIL_HEIGHT_RATIO;
+        let _y_offset = (height as f64 - thumbnail_height) / 2.0;
+
+        for (i, workspace) in self.workspaces.iter().enumerate() {
+            let thumb_x = i as f64 * (thumbnail_width + WORKSPACE_THUMBNAIL_SPACING_PX);
+
+            if x >= thumb_x && x <= thumb_x + thumbnail_width {
+                return Some(workspace.id);
+            }
+        }
+
+        None
+    }
+
+    fn select_workspace(&mut self, id: i32, height: i32) -> bool {
+        self.selected_workspace = Some(id);
+        let success = self.hyprland.switch_workspace(id);
+        self.dismiss();
+
+        // After switching, capture the new workspace's screenshot for next time
+        if success {
+            // Find the monitor for this workspace
+            if let Some(workspace) = self.workspaces.iter().find(|w| w.id == id) {
+                let target_height = (height as f64 * WORKSPACE_THUMBNAIL_HEIGHT_RATIO) as i32;
+                if let Some(surface) = self.screenshot_cache.capture_screenshot(&workspace.monitor, target_height) {
+                    self.screenshot_cache.screenshots.insert(id, surface);
+                }
+            }
+        }
+
+        success
     }
 }
 
@@ -1218,6 +1371,89 @@ fn draw_rounded_rectangle(c: &Context, x: f64, y: f64, width: f64, height: f64, 
     c.close_path();
 }
 
+// Render workspace overlay on top of the display
+fn render_workspace_overlay(
+    c: &Context,
+    width: i32,
+    height: i32,
+    overlay: &WorkspaceOverlay,
+    config: &Config,
+) {
+    if !overlay.active || overlay.workspaces.is_empty() {
+        return;
+    }
+
+    // Draw black background over entire bar
+    c.set_source_rgb(0.0, 0.0, 0.0);
+    c.rectangle(0.0, 0.0, width as f64, height as f64);
+    c.fill().unwrap();
+
+    let workspace_count = overlay.workspaces.len();
+    let total_spacing = WORKSPACE_THUMBNAIL_SPACING_PX * (workspace_count - 1) as f64;
+    let thumbnail_width = (width as f64 - total_spacing) / workspace_count as f64;
+    let thumbnail_height = height as f64 * WORKSPACE_THUMBNAIL_HEIGHT_RATIO;
+    let y_offset = (height as f64 - thumbnail_height) / 2.0;
+    let radius = 6.0;
+
+    // Get colors for styling
+    let (bg_inactive, bg_active, _, _, text_color) =
+        config.colors.get_button_colors("HyprlandWorkspaces");
+
+    for (i, workspace) in overlay.workspaces.iter().enumerate() {
+        let thumb_x = i as f64 * (thumbnail_width + WORKSPACE_THUMBNAIL_SPACING_PX);
+
+        // Draw background (highlighted for active workspace)
+        if workspace.is_active {
+            c.set_source_rgb(bg_active[0], bg_active[1], bg_active[2]);
+        } else {
+            c.set_source_rgb(bg_inactive[0], bg_inactive[1], bg_inactive[2]);
+        }
+        draw_rounded_rectangle(c, thumb_x, y_offset, thumbnail_width, thumbnail_height, radius);
+        c.fill().unwrap();
+
+        // Try to draw screenshot thumbnail
+        if let Some(screenshot) = overlay.screenshot_cache.get(workspace.id) {
+            let screenshot_width = screenshot.width() as f64;
+            let screenshot_height = screenshot.height() as f64;
+
+            // Calculate scaling to fit within thumbnail bounds with padding
+            let padding = 2.0;
+            let available_width = thumbnail_width - 2.0 * padding;
+            let available_height = thumbnail_height - 2.0 * padding;
+
+            let scale_x = available_width / screenshot_width;
+            let scale_y = available_height / screenshot_height;
+            let scale = scale_x.min(scale_y);
+
+            let scaled_width = screenshot_width * scale;
+            let scaled_height = screenshot_height * scale;
+
+            // Center the screenshot
+            let img_x = thumb_x + (thumbnail_width - scaled_width) / 2.0;
+            let img_y = y_offset + (thumbnail_height - scaled_height) / 2.0;
+
+            c.save().unwrap();
+            c.translate(img_x, img_y);
+            c.scale(scale, scale);
+            c.set_source_surface(screenshot, 0.0, 0.0).unwrap();
+            c.paint().unwrap();
+            c.restore().unwrap();
+        } else {
+            // Fallback: draw workspace number
+            c.set_source_rgb(text_color[0], text_color[1], text_color[2]);
+            c.set_font_size(24.0);
+
+            let text = workspace.id.to_string();
+            let extents = c.text_extents(&text).unwrap();
+            let text_x = thumb_x + (thumbnail_width - extents.width()) / 2.0;
+            let text_y = y_offset + (thumbnail_height + extents.height()) / 2.0;
+
+            c.move_to(text_x, text_y);
+            c.show_text(&text).unwrap();
+        }
+    }
+}
+
 struct Interface;
 
 impl LibinputInterface for Interface {
@@ -1303,14 +1539,19 @@ fn real_main(drm: &mut DrmBackend) {
     let (mut cfg, layers) = cfg_mgr.load_config(width);
     let mut pixel_shift = PixelShiftManager::new();
 
-    // drop privileges to input and video groups
-    let groups = ["input", "video"];
+    // Detect Hyprland socket BEFORE dropping privileges
+    // (after privdrop, we can't access /run/user/1000/)
+    let hyprland_socket = HyprlandClient::detect_socket_path();
 
-    PrivDrop::default()
-        .user("nobody")
-        .group_list(&groups)
-        .apply()
-        .unwrap_or_else(|e| panic!("Failed to drop privileges: {}", e));
+    // drop privileges to input and video groups (only if running as root)
+    if geteuid().is_root() {
+        let groups = ["input", "video"];
+        PrivDrop::default()
+            .user("nobody")
+            .group_list(&groups)
+            .apply()
+            .unwrap_or_else(|e| panic!("Failed to drop privileges: {}", e));
+    }
 
     let mut surface =
         ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
@@ -1368,6 +1609,7 @@ fn real_main(drm: &mut DrmBackend) {
     let mut digitizer: Option<InputDevice> = None;
     let mut touches: HashMap<i32, TouchState> = HashMap::new();
     let mut slider_overlay = SliderOverlay::new();
+    let mut workspace_overlay = WorkspaceOverlay::new(&cfg, hyprland_socket);
     loop {
         if cfg_mgr.update_config(&mut cfg, &mut layer_manager.layers, width) {
             layer_manager.active_layer = 0;
@@ -1388,6 +1630,11 @@ fn real_main(drm: &mut DrmBackend) {
 
         // Update slider overlay auto-dismiss
         if slider_overlay.update() {
+            needs_complete_redraw = true;
+        }
+
+        // Update workspace overlay auto-dismiss
+        if workspace_overlay.update() {
             needs_complete_redraw = true;
         }
 
@@ -1418,6 +1665,7 @@ fn real_main(drm: &mut DrmBackend) {
                 shift,
                 needs_complete_redraw,
                 &slider_overlay,
+                &workspace_overlay,
             );
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
@@ -1447,13 +1695,21 @@ fn real_main(drm: &mut DrmBackend) {
                     }
                 }
                 Event::Keyboard(KeyboardEvent::Key(key)) => {
-                    if key.key() == Key::Fn as u32 && key.key_state() == KeyState::Pressed {
-                        // Dismiss slider overlay if active
-                        if slider_overlay.active {
-                            slider_overlay.dismiss();
+                    if key.key_state() == KeyState::Pressed {
+                        if key.key() == Key::Fn as u32 {
+                            // Dismiss overlays if active
+                            if workspace_overlay.active {
+                                workspace_overlay.dismiss();
+                            } else if slider_overlay.active {
+                                slider_overlay.dismiss();
+                            }
+                            layer_manager.cycle_layer();
+                            needs_complete_redraw = true;
+                        } else if key.key() == Key::Esc as u32 && workspace_overlay.active {
+                            // ESC dismisses workspace overlay
+                            workspace_overlay.dismiss();
+                            needs_complete_redraw = true;
                         }
-                        layer_manager.cycle_layer();
-                        needs_complete_redraw = true;
                     }
                 }
                 Event::Touch(te) => {
@@ -1464,6 +1720,20 @@ fn real_main(drm: &mut DrmBackend) {
                         TouchEvent::Down(dn) => {
                             let x = dn.x_transformed(width as u32);
                             let y = dn.y_transformed(height as u32);
+
+                            // Handle workspace overlay touch
+                            if workspace_overlay.active {
+                                if let Some(workspace_id) = workspace_overlay.hit_test(x, width as i32, height as i32) {
+                                    workspace_overlay.select_workspace(workspace_id, height as i32);
+                                    needs_complete_redraw = true;
+                                } else {
+                                    // Touch outside thumbnails - dismiss overlay
+                                    workspace_overlay.dismiss();
+                                    needs_complete_redraw = true;
+                                }
+                                continue;
+                            }
+
                             if let Some(btn) = layer_manager.get_active().hit(width, height, x, y, None) {
                                 touches.insert(dn.seat_slot() as i32, TouchState {
                                     down_time: Instant::now(),
@@ -1475,12 +1745,12 @@ fn real_main(drm: &mut DrmBackend) {
                                     last_slider_value: (x / width as f64).clamp(0.0, 1.0) as f32,
                                 });
 
-                                // Don't show active state for slider buttons
-                                let is_slider = matches!(
+                                // Don't show active state for slider or hyprland buttons
+                                let is_special = matches!(
                                     layer_manager.get_active().buttons[btn].1.image,
-                                    ButtonImage::Slider(_) | ButtonImage::SliderText(_, _)
+                                    ButtonImage::Slider(_) | ButtonImage::SliderText(_, _) | ButtonImage::HyprlandWorkspaces(_)
                                 );
-                                if !is_slider {
+                                if !is_special {
                                     layer_manager.get_active_mut().buttons[btn]
                                         .1
                                         .set_active(&mut uinput, true);
@@ -1579,10 +1849,14 @@ fn real_main(drm: &mut DrmBackend) {
                             let layer = touch_state.layer;
                             let btn = touch_state.button;
 
-                            // Check if this was a short tap on a slider (show overlay for viewing)
+                            // Check button type
                             let is_slider = matches!(
                                 layer_manager.layers[layer].buttons[btn].1.image,
                                 ButtonImage::Slider(_) | ButtonImage::SliderText(_, _)
+                            );
+                            let is_hyprland = matches!(
+                                layer_manager.layers[layer].buttons[btn].1.image,
+                                ButtonImage::HyprlandWorkspaces(_)
                             );
 
                             if is_slider && !touch_state.is_dragging {
@@ -1602,10 +1876,14 @@ fn real_main(drm: &mut DrmBackend) {
                                         needs_complete_redraw = true;
                                     }
                                 }
+                            } else if is_hyprland && workspace_overlay.is_enabled(&cfg) {
+                                // Tap on Hyprland workspaces button - show workspace overlay
+                                workspace_overlay.show(height as i32);
+                                needs_complete_redraw = true;
                             }
 
-                            // Don't call set_active for sliders
-                            if !is_slider {
+                            // Don't call set_active for special buttons
+                            if !is_slider && !is_hyprland {
                                 layer_manager.layers[layer].buttons[btn].1.set_active(&mut uinput, false);
                             }
                         }
