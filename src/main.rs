@@ -1197,17 +1197,17 @@ fn get_slider_value(slider_type: &SliderType, get_command: Option<&String>) -> f
             }
         }
         SliderType::Volume => {
-            // Try to read volume with wpctl, default to 50% if unavailable
+            // Read volume with wpctl (works when running as user)
             match Command::new("/usr/bin/wpctl")
-                .env("XDG_RUNTIME_DIR", "/run/user/1000")
-                .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
                 .args(&["get-volume", "@DEFAULT_AUDIO_SINK@"])
                 .output() {
                 Ok(output) if output.status.success() => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
-                    // Output format: "Volume: 0.50"
+                    // Output format: "Volume: 0.50" or "Volume: 0.50 [MUTED]"
                     if let Some(vol_str) = stdout.strip_prefix("Volume: ") {
-                        if let Ok(value) = vol_str.trim().parse::<f32>() {
+                        // Take just the number part (before any space for [MUTED])
+                        let vol_num = vol_str.split_whitespace().next().unwrap_or("0.5");
+                        if let Ok(value) = vol_num.parse::<f32>() {
                             return value.clamp(0.0, 1.0);
                         }
                     }
@@ -1255,28 +1255,10 @@ where
             }
         }
         SliderType::Volume => {
-            // Use VolumeUp/VolumeDown key events for reliable control
-            // Each key press changes volume by ~5%, so calculate steps needed
-            let target_percent = (clamped_value * 100.0).round() as i32;
-            let current_percent = (prev_value * 100.0).round() as i32;
-            let diff = target_percent - current_percent;
-
-            // Each volume key press is approximately 5%
-            let steps = (diff as f32 / 5.0).round() as i32;
-
-            if steps > 0 {
-                // Volume up
-                for _ in 0..steps {
-                    toggle_key(uinput, Key::VolumeUp, 1);
-                    toggle_key(uinput, Key::VolumeUp, 0);
-                }
-            } else if steps < 0 {
-                // Volume down
-                for _ in 0..(-steps) {
-                    toggle_key(uinput, Key::VolumeDown, 1);
-                    toggle_key(uinput, Key::VolumeDown, 0);
-                }
-            }
+            // Use wpctl to set volume directly (works when running as user)
+            let _ = Command::new("/usr/bin/wpctl")
+                .args(&["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{}%", percent)])
+                .output();
         }
     }
 }
