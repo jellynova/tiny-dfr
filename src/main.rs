@@ -45,6 +45,9 @@ mod display;
 mod fonts;
 mod hyprland;
 mod pixel_shift;
+mod pomodoro;
+mod sysinfo;
+mod visualizer;
 
 use crate::config::ConfigManager;
 use backlight::BacklightManager;
