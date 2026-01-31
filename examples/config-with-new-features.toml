@@ -1,0 +1,50 @@
+# Example config with Pomodoro, SysInfo, and Visualizer buttons
+# Copy to /etc/tiny-dfr/config.toml to use
+
+# Using the new multi-layer format
+[[Layers]]
+Name = "Media + Extras"
+Buttons = [
+    # Media controls
+    { Icon = "brightness_low",  Action = "BrightnessDown" },
+    { Icon = "brightness_high", Action = "BrightnessUp"   },
+    { Icon = "fast_rewind",     Action = "PreviousSong"   },
+    { Icon = "play_pause",      Action = "PlayPause"      },
+    { Icon = "fast_forward",    Action = "NextSong"       },
+    { Icon = "volume_off",      Action = "Mute"           },
+    { Icon = "volume_down",     Action = "VolumeDown"     },
+    { Icon = "volume_up",       Action = "VolumeUp"       },
+    # New features - use F13-F15 as placeholders (won't actually trigger)
+    { Pomodoro = true,          Action = "F13"            },
+    { Sysinfo = true,           Action = "F14"            },
+    { Visualizer = 16,          Action = "F15"            },
+]
+
+[[Layers]]
+Name = "Function Keys"
+Buttons = [
+    { Text = "F1",  Action = "F1"  },
+    { Text = "F2",  Action = "F2"  },
+    { Text = "F3",  Action = "F3"  },
+    { Text = "F4",  Action = "F4"  },
+    { Text = "F5",  Action = "F5"  },
+    { Text = "F6",  Action = "F6"  },
+    { Text = "F7",  Action = "F7"  },
+    { Text = "F8",  Action = "F8"  },
+    { Text = "F9",  Action = "F9"  },
+    { Text = "F10", Action = "F10" },
+    { Text = "F11", Action = "F11" },
+    { Text = "F12", Action = "F12" },
+]
+
+[Colors]
+ButtonBackgroundInactive = [0.2, 0.2, 0.2]
+ButtonBackgroundActive = [0.4, 0.4, 0.4]
+IconColor = [1.0, 1.0, 1.0]
+TextColor = [1.0, 1.0, 1.0]
+
+# Custom colors for new features
+[Colors.ButtonOverrides]
+"Pomodoro" = { ButtonBackgroundInactive = [0.8, 0.2, 0.2], TextColor = [1.0, 1.0, 1.0] }
+"SystemStats" = { ButtonBackgroundInactive = [0.2, 0.6, 0.2], TextColor = [1.0, 1.0, 1.0] }
+"Visualizer" = { ButtonBackgroundInactive = [0.2, 0.2, 0.8], TextColor = [1.0, 1.0, 1.0] }

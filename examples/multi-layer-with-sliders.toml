@@ -1,0 +1,87 @@
+# Multi-Layer Config with Slider Controls for tiny-dfr
+# Demonstrates the new multi-layer system and interactive slider buttons
+#
+# Slider Interaction:
+# - Short tap: Shows current value overlay (read-only view)
+# - Tap & hold + drag: Directly adjusts value while dragging
+# - Overlay auto-dismisses after 2 seconds
+#
+# Press Fn to cycle through layers
+
+# Basic Settings
+ShowButtonOutlines = false
+EnablePixelShift = false
+FontTemplate = ":bold"
+AdaptiveBrightness = true
+ActiveBrightness = 128
+
+# Layer 1: Function Keys
+[[Layers]]
+Name = "Function Keys"
+Buttons = [
+    { Text = "F1",  Action = "F1"  },
+    { Text = "F2",  Action = "F2"  },
+    { Text = "F3",  Action = "F3"  },
+    { Text = "F4",  Action = "F4"  },
+    { Text = "F5",  Action = "F5"  },
+    { Text = "F6",  Action = "F6"  },
+    { Text = "F7",  Action = "F7"  },
+    { Text = "F8",  Action = "F8"  },
+    { Text = "F9",  Action = "F9"  },
+    { Text = "F10", Action = "F10" },
+    { Text = "F11", Action = "F11" },
+    { Text = "F12", Action = "F12" }
+]
+
+# Layer 2: Media Controls with Icon Sliders
+[[Layers]]
+Name = "Media"
+Buttons = [
+    { Slider = "Brightness", Icon = "brightness_low", Action = "BrightnessDown" },
+    { Icon = "brightness_high", Action = "BrightnessUp" },
+    { Icon = "mic_off", Action = "MicMute" },
+    { Icon = "search", Action = "Search" },
+    { Slider = "KeyboardBacklight", Icon = "backlight_low", Action = "IllumDown" },
+    { Icon = "backlight_high", Action = "IllumUp" },
+    { Icon = "fast_rewind", Action = "PreviousSong" },
+    { Icon = "play_pause", Action = "PlayPause" },
+    { Icon = "fast_forward", Action = "NextSong" },
+    { Slider = "Volume", Icon = "volume_off", Action = "Mute" },
+    { Icon = "volume_down", Action = "VolumeDown" },
+    { Icon = "volume_up", Action = "VolumeUp" }
+]
+
+# Layer 3: Slider Demo Layer
+# This layer shows different ways to use sliders
+#
+# SliderGetCommand: Should output a percentage (0-100) to stdout
+# SliderSetCommand: Use {} as placeholder for percentage value (0-100)
+#
+# Note: Commands are optional. If not provided, tiny-dfr will use default
+# system paths for brightness/volume/keyboard backlight controls.
+[[Layers]]
+Name = "Sliders"
+Buttons = [
+    { Slider = "Volume", Text = "VOL", Action = "VolumeUp", Stretch = 3,
+      SliderGetCommand = "/usr/bin/amixer sget Master | /usr/bin/grep -oP '\\[\\K[0-9]+(?=%\\])'",
+      SliderSetCommand = "/usr/bin/amixer sset Master {}%" },
+    { Slider = "Brightness", Text = "BRT", Action = "BrightnessUp", Stretch = 3,
+      SliderGetCommand = "/usr/bin/awk '{max = $1} END {getline < \"/sys/class/backlight/apple-panel-bl/brightness\"; printf \"%.0f\", ($0 / max) * 100}' /sys/class/backlight/apple-panel-bl/max_brightness",
+      SliderSetCommand = "/usr/bin/sh -c 'max=$(/usr/bin/cat /sys/class/backlight/apple-panel-bl/max_brightness); val=$((max * {} / 100)); /usr/bin/tee /sys/class/backlight/apple-panel-bl/brightness <<< $val'" },
+    { Slider = "KeyboardBacklight", Text = "KBD", Action = "IllumUp", Stretch = 3,
+      SliderGetCommand = "/usr/bin/awk '{max = $1} END {getline < \"/sys/class/leds/smc::kbd_backlight/brightness\"; printf \"%.0f\", ($0 / max) * 100}' /sys/class/leds/smc::kbd_backlight/max_brightness",
+      SliderSetCommand = "/usr/bin/sh -c 'max=$(/usr/bin/cat /sys/class/leds/smc::kbd_backlight/max_brightness); val=$((max * {} / 100)); /usr/bin/tee /sys/class/leds/smc::kbd_backlight/brightness <<< $val'" },
+    { Time = "12hr", Action = "Time", Stretch = 3 }
+]
+
+# Color Configuration
+[Colors]
+ButtonBackgroundInactive = [0.2, 0.2, 0.2]
+ButtonBackgroundActive = [0.4, 0.4, 0.4]
+IconColor = [1.0, 1.0, 1.0]
+IconColorActive = [1.0, 1.0, 1.0]
+TextColor = [1.0, 1.0, 1.0]
+
+# You can also override colors for specific buttons
+[Colors.ButtonOverrides]
+"esc" = { ButtonBackgroundInactive = [0.4, 0.4, 0.4], ButtonBackgroundActive = [0.6, 0.6, 0.6] }

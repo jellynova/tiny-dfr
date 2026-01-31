@@ -55,11 +55,74 @@ use config::{ButtonConfig, Config};
 use display::DrmBackend;
 use hyprland::{HyprlandClient, ScreenshotCache, WorkspaceInfo};
 use pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
+use pomodoro::{PomodoroTimer, PomodoroState};
+use sysinfo::SystemStats;
+use visualizer::AudioVisualizer;
 
 const BUTTON_SPACING_PX: i32 = 16;
 // Color constants are now configurable through the config system
 const ICON_SIZE: i32 = 48;
 const TIMEOUT_MS: i32 = 10 * 1000;
+
+/// Shared state for widget buttons (Pomodoro, SystemStats, Visualizer)
+struct WidgetState {
+    pomodoro: PomodoroTimer,
+    sysinfo: SystemStats,
+    visualizer: AudioVisualizer,
+    last_sysinfo_update: Instant,
+}
+
+impl WidgetState {
+    fn new() -> Self {
+        Self {
+            pomodoro: PomodoroTimer::new(),
+            sysinfo: SystemStats::new(60),
+            visualizer: AudioVisualizer::new(16, 0.85),
+            last_sysinfo_update: Instant::now(),
+        }
+    }
+
+    fn update(&mut self) -> bool {
+        let mut needs_redraw = false;
+
+        // Update pomodoro timer
+        if self.pomodoro.tick() {
+            needs_redraw = true;
+        }
+
+        // Update sysinfo every second
+        if self.last_sysinfo_update.elapsed().as_millis() >= 1000 {
+            self.sysinfo.sample();
+            self.last_sysinfo_update = Instant::now();
+            needs_redraw = true;
+        }
+
+        // Update visualizer if running
+        if self.visualizer.is_running() {
+            self.visualizer.update();
+            needs_redraw = true;
+        }
+
+        needs_redraw
+    }
+}
+
+/// Convert HSV to RGB (h: 0-1, s: 0-1, v: 0-1)
+fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (f64, f64, f64) {
+    let c = v * s;
+    let h_prime = h * 6.0;
+    let x = c * (1.0 - ((h_prime % 2.0) - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match h_prime as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (r + m, g + m, b + m)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BatteryState {
@@ -113,6 +176,9 @@ enum ButtonImage {
     Slider(SliderConfig),
     SliderText(SliderType, String),
     HyprlandWorkspaces(Option<Handle>),
+    Pomodoro,
+    SystemStats,
+    Visualizer(usize), // bar_count
 }
 
 struct Button {
@@ -266,6 +332,12 @@ impl Button {
     fn with_config(cfg: ButtonConfig) -> Button {
         if cfg.hyprland_workspaces == Some(true) {
             Button::new_hyprland_workspaces(cfg.action, cfg.icon, cfg.theme)
+        } else if cfg.pomodoro == Some(true) {
+            Button::new_pomodoro(cfg.action)
+        } else if cfg.sysinfo == Some(true) {
+            Button::new_sysinfo(cfg.action)
+        } else if let Some(bar_count) = cfg.visualizer {
+            Button::new_visualizer(cfg.action, bar_count)
         } else if let Some(slider_type) = cfg.slider {
             Button::new_slider(
                 cfg.action,
@@ -289,7 +361,7 @@ impl Button {
                 Button::new_text("Battery N/A".to_string(), cfg.action)
             }
         } else {
-            panic!("Invalid config, a button must have either Text, Icon, Time, Battery, Slider, or HyprlandWorkspaces")
+            panic!("Invalid config, a button must have either Text, Icon, Time, Battery, Slider, Pomodoro, Sysinfo, Visualizer, or HyprlandWorkspaces")
         }
     }
     fn new_text(text: String, action: Key) -> Button {
@@ -461,6 +533,33 @@ impl Button {
         }
     }
 
+    fn new_pomodoro(action: Key) -> Button {
+        Button {
+            action,
+            active: false,
+            changed: false,
+            image: ButtonImage::Pomodoro,
+        }
+    }
+
+    fn new_sysinfo(action: Key) -> Button {
+        Button {
+            action,
+            active: false,
+            changed: false,
+            image: ButtonImage::SystemStats,
+        }
+    }
+
+    fn new_visualizer(action: Key, bar_count: usize) -> Button {
+        Button {
+            action,
+            active: false,
+            changed: false,
+            image: ButtonImage::Visualizer(bar_count.max(4).min(32)),
+        }
+    }
+
     fn render(
         &self,
         c: &Context,
@@ -469,6 +568,7 @@ impl Button {
         button_width: u64,
         y_shift: f64,
         config: &crate::config::Config,
+        widgets: &WidgetState,
     ) {
         match &self.image {
             ButtonImage::Text(text) => {
@@ -598,6 +698,120 @@ impl Button {
                     c.show_text(text).unwrap();
                 }
             }
+            ButtonImage::Pomodoro => {
+                // Pomodoro timer with progress bar and time display
+                let pomo = &widgets.pomodoro;
+                let bot = y_shift + height as f64 * 0.25;
+                let top = y_shift + height as f64 * 0.75;
+                let bar_height = top - bot;
+                let padding = 6.0;
+                let bar_left = button_left_edge + padding;
+                let bar_width = button_width as f64 - padding * 2.0;
+
+                // Progress bar background
+                c.set_source_rgb(0.15, 0.15, 0.15);
+                c.rectangle(bar_left, bot, bar_width, bar_height);
+                c.fill().unwrap();
+
+                // Progress bar fill (color based on state)
+                let progress = pomo.progress();
+                let (r, g, b) = match pomo.state {
+                    PomodoroState::Working => (0.8, 0.2, 0.2),
+                    PomodoroState::ShortBreak => (0.2, 0.7, 0.3),
+                    PomodoroState::LongBreak => (0.2, 0.5, 0.8),
+                    PomodoroState::Idle => (0.4, 0.4, 0.4),
+                };
+                c.set_source_rgb(r, g, b);
+                c.rectangle(bar_left, bot, bar_width * progress as f64, bar_height);
+                c.fill().unwrap();
+
+                // Time text overlay
+                let time_str = pomo.format_time();
+                self.set_text_color(c, config);
+                c.set_font_size(24.0);
+                let extents = c.text_extents(&time_str).unwrap();
+                c.move_to(
+                    button_left_edge + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
+                    y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
+                );
+                c.show_text(&time_str).unwrap();
+                c.set_font_size(32.0);
+            }
+            ButtonImage::SystemStats => {
+                // System stats: CPU | RAM | Temp as mini bars
+                let stats = &widgets.sysinfo;
+                let cpu = stats.get_cpu_percent();
+                let ram = stats.get_ram_percent();
+                let temp = stats.get_temp_celsius();
+
+                let bot = y_shift + height as f64 * 0.3;
+                let top = y_shift + height as f64 * 0.7;
+                let bar_height = top - bot;
+                let padding = 4.0;
+                let total_width = button_width as f64 - padding * 2.0;
+                let bar_width = (total_width - 4.0) / 3.0; // 3 bars with 2px gaps
+
+                // CPU bar (cyan)
+                let cpu_x = button_left_edge + padding;
+                c.set_source_rgb(0.15, 0.15, 0.15);
+                c.rectangle(cpu_x, bot, bar_width, bar_height);
+                c.fill().unwrap();
+                c.set_source_rgb(0.0, 0.8, 0.8);
+                let cpu_fill = (cpu / 100.0) as f64 * bar_height;
+                c.rectangle(cpu_x, top - cpu_fill, bar_width, cpu_fill);
+                c.fill().unwrap();
+
+                // RAM bar (magenta)
+                let ram_x = cpu_x + bar_width + 2.0;
+                c.set_source_rgb(0.15, 0.15, 0.15);
+                c.rectangle(ram_x, bot, bar_width, bar_height);
+                c.fill().unwrap();
+                c.set_source_rgb(0.8, 0.2, 0.8);
+                let ram_fill = (ram / 100.0) as f64 * bar_height;
+                c.rectangle(ram_x, top - ram_fill, bar_width, ram_fill);
+                c.fill().unwrap();
+
+                // Temp bar (yellow/red gradient based on temp)
+                let temp_x = ram_x + bar_width + 2.0;
+                c.set_source_rgb(0.15, 0.15, 0.15);
+                c.rectangle(temp_x, bot, bar_width, bar_height);
+                c.fill().unwrap();
+                let temp_norm = ((temp - 30.0) / 70.0).clamp(0.0, 1.0) as f64;
+                c.set_source_rgb(0.9, 0.9 - temp_norm * 0.7, 0.1);
+                let temp_fill = temp_norm * bar_height;
+                c.rectangle(temp_x, top - temp_fill, bar_width, temp_fill);
+                c.fill().unwrap();
+            }
+            ButtonImage::Visualizer(bar_count) => {
+                // Audio visualizer bars
+                let vis = &widgets.visualizer;
+                let bot = y_shift + height as f64 * 0.2;
+                let top = y_shift + height as f64 * 0.8;
+                let bar_height = top - bot;
+                let padding = 2.0;
+                let total_width = button_width as f64 - padding * 2.0;
+                let num_bars = (*bar_count).min(vis.bar_count());
+                let bar_gap = 1.0;
+                let bar_width = (total_width - bar_gap * (num_bars - 1) as f64) / num_bars as f64;
+
+                for i in 0..num_bars {
+                    let x = button_left_edge + padding + i as f64 * (bar_width + bar_gap);
+                    let level = vis.bars.get(i).copied().unwrap_or(0.0) as f64;
+                    let fill_height = level * bar_height;
+
+                    // Bar background
+                    c.set_source_rgb(0.1, 0.1, 0.15);
+                    c.rectangle(x, bot, bar_width, bar_height);
+                    c.fill().unwrap();
+
+                    // Bar fill with gradient color (blue to purple to pink)
+                    let hue = 0.6 + level as f64 * 0.3;
+                    let (r, g, b) = hsv_to_rgb(hue, 0.8, 0.9);
+                    c.set_source_rgb(r, g, b);
+                    c.rectangle(x, top - fill_height, bar_width, fill_height);
+                    c.fill().unwrap();
+                }
+            }
         }
     }
     fn render_svg_with_color(&self, c: &Context, svg: &Handle, x: f64, y: f64, config: &crate::config::Config, is_active: bool) {
@@ -666,6 +880,9 @@ impl Button {
             },
             ButtonImage::SliderText(_, text) => text.clone(),
             ButtonImage::HyprlandWorkspaces(_) => "HyprlandWorkspaces".to_string(),
+            ButtonImage::Pomodoro => "Pomodoro".to_string(),
+            ButtonImage::SystemStats => "SystemStats".to_string(),
+            ButtonImage::Visualizer(_) => "Visualizer".to_string(),
         }
     }
 
@@ -751,6 +968,7 @@ impl FunctionLayer {
         complete_redraw: bool,
         slider_overlay: &SliderOverlay,
         workspace_overlay: &WorkspaceOverlay,
+        widgets: &WidgetState,
     ) -> Vec<ClipRect> {
         let c = Context::new(surface).unwrap();
         let mut modified_regions = if complete_redraw {
@@ -869,6 +1087,7 @@ impl FunctionLayer {
                 button_width.ceil() as u64,
                 pixel_shift_y,
                 config,
+                widgets,
             );
 
             button.changed = false;
@@ -1595,6 +1814,7 @@ fn real_main(drm: &mut DrmBackend) {
     let mut touches: HashMap<i32, TouchState> = HashMap::new();
     let mut slider_overlay = SliderOverlay::new();
     let mut workspace_overlay = WorkspaceOverlay::new(&cfg, hyprland_socket);
+    let mut widgets = WidgetState::new();
     loop {
         if cfg_mgr.update_config(&mut cfg, &mut layer_manager.layers, width) {
             layer_manager.active_layer = 0;
@@ -1615,6 +1835,11 @@ fn real_main(drm: &mut DrmBackend) {
 
         // Update slider overlay auto-dismiss
         if slider_overlay.update() {
+            needs_complete_redraw = true;
+        }
+
+        // Update widget states (pomodoro, sysinfo, visualizer)
+        if widgets.update() {
             needs_complete_redraw = true;
         }
 
@@ -1651,6 +1876,7 @@ fn real_main(drm: &mut DrmBackend) {
                 needs_complete_redraw,
                 &slider_overlay,
                 &workspace_overlay,
+                &widgets,
             );
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
@@ -1730,10 +1956,11 @@ fn real_main(drm: &mut DrmBackend) {
                                     last_slider_value: (x / width as f64).clamp(0.0, 1.0) as f32,
                                 });
 
-                                // Don't show active state for slider or hyprland buttons
+                                // Don't show active state for special widget buttons
                                 let is_special = matches!(
                                     layer_manager.get_active().buttons[btn].1.image,
                                     ButtonImage::Slider(_) | ButtonImage::SliderText(_, _) | ButtonImage::HyprlandWorkspaces(_)
+                                    | ButtonImage::Pomodoro | ButtonImage::SystemStats | ButtonImage::Visualizer(_)
                                 );
                                 if !is_special {
                                     layer_manager.get_active_mut().buttons[btn]
@@ -1843,6 +2070,18 @@ fn real_main(drm: &mut DrmBackend) {
                                 layer_manager.layers[layer].buttons[btn].1.image,
                                 ButtonImage::HyprlandWorkspaces(_)
                             );
+                            let is_pomodoro = matches!(
+                                layer_manager.layers[layer].buttons[btn].1.image,
+                                ButtonImage::Pomodoro
+                            );
+                            let is_visualizer = matches!(
+                                layer_manager.layers[layer].buttons[btn].1.image,
+                                ButtonImage::Visualizer(_)
+                            );
+                            let is_sysinfo = matches!(
+                                layer_manager.layers[layer].buttons[btn].1.image,
+                                ButtonImage::SystemStats
+                            );
 
                             if is_slider && !touch_state.is_dragging {
                                 let elapsed = touch_state.down_time.elapsed().as_millis();
@@ -1865,10 +2104,35 @@ fn real_main(drm: &mut DrmBackend) {
                                 // Tap on Hyprland workspaces button - show workspace overlay
                                 workspace_overlay.show(height as i32);
                                 needs_complete_redraw = true;
+                            } else if is_pomodoro {
+                                let elapsed = touch_state.down_time.elapsed().as_millis();
+                                if elapsed >= TAP_HOLD_THRESHOLD_MS {
+                                    // Long press - reset timer
+                                    widgets.pomodoro.reset();
+                                } else if widgets.pomodoro.state == PomodoroState::Idle {
+                                    // Short tap when idle - start timer
+                                    widgets.pomodoro.start();
+                                } else {
+                                    // Short tap when running - pause/resume
+                                    widgets.pomodoro.pause();
+                                }
+                                needs_complete_redraw = true;
+                            } else if is_visualizer {
+                                // Toggle visualizer on/off
+                                if widgets.visualizer.is_running() {
+                                    widgets.visualizer.stop();
+                                } else {
+                                    let _ = widgets.visualizer.start();
+                                }
+                                needs_complete_redraw = true;
+                            } else if is_sysinfo {
+                                // Force refresh sysinfo
+                                widgets.sysinfo.sample();
+                                needs_complete_redraw = true;
                             }
 
                             // Don't call set_active for special buttons
-                            if !is_slider && !is_hyprland {
+                            if !is_slider && !is_hyprland && !is_pomodoro && !is_visualizer && !is_sysinfo {
                                 layer_manager.layers[layer].buttons[btn].1.set_active(&mut uinput, false);
                             }
                         }

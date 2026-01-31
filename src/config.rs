@@ -164,6 +164,9 @@ pub struct ButtonConfig {
     pub action: Key,
     pub stretch: Option<usize>,
     pub hyprland_workspaces: Option<bool>,
+    pub pomodoro: Option<bool>,
+    pub sysinfo: Option<bool>,
+    pub visualizer: Option<usize>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -236,6 +239,9 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                     slider_get_command: None,
                     slider_set_command: None,
                     hyprland_workspaces: None,
+                    pomodoro: None,
+                    sysinfo: None,
+                    visualizer: None,
                 });
             }
             FunctionLayer::with_config(lc.buttons)
@@ -261,6 +267,9 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                         slider_get_command: None,
                         slider_set_command: None,
                         hyprland_workspaces: None,
+                        pomodoro: None,
+                        sysinfo: None,
+                        visualizer: None,
                     },
                 );
             }
